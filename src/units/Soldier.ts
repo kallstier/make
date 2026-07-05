@@ -39,7 +39,6 @@ export class Soldier extends Unit {
   aiTick(dt: number, ctx: BattleContext): void {
     if (!this.alive) return;
     this.updateFlash(ctx);
-    if (this.kind === 'ranged') this.combatRanged(dt, ctx, this.stats());
-    else this.combatMelee(dt, ctx, this.stats());
+    this.combat(dt, ctx, this.stats(), this.kind === 'ranged');
   }
 }

@@ -122,11 +122,40 @@ export const MONSTER = {
     attackDamage: 26,
     attackCooldown: 1150,
     knockback: 6
+  },
+  // 보스: 무리 A 대장 (고블린 킹) — 거대한 몽둥이, 높은 HP/공격력
+  goblinKing: {
+    hp: 440,
+    speed: 70,
+    detectRange: 340,
+    attackRange: 44,
+    attackDamage: 32,
+    attackCooldown: 950,
+    knockback: 9
+  },
+  // 보스: 무리 B 대장 (오니 대장) — 기존 오니보다 크고 강함
+  oniLord: {
+    hp: 560,
+    speed: 58,
+    detectRange: 320,
+    attackRange: 52,
+    attackDamage: 40,
+    attackCooldown: 1200,
+    knockback: 12
   }
 };
 
 // 유닛 병종 식별자
-export type UnitType = 'hero' | 'melee' | 'ranged' | 'spear' | 'goblin' | 'goblinArcher' | 'oni';
+export type UnitType =
+  | 'hero'
+  | 'melee'
+  | 'ranged'
+  | 'spear'
+  | 'goblin'
+  | 'goblinArcher'
+  | 'oni'
+  | 'goblinKing'
+  | 'oniLord';
 
 // ============================================================
 // RPG 스탯 층 (직업/레벨/장비 → 최종 스탯)
@@ -141,7 +170,9 @@ export const CLASS_NAME: Record<UnitType, string> = {
   spear: '창병',
   goblin: '고블린',
   goblinArcher: '고블린 궁수',
-  oni: '오니'
+  oni: '오니',
+  goblinKing: '고블린 킹',
+  oniLord: '오니 대장'
 };
 
 // 스탯 성분: 공격력/방어력/최대HP/최대MP/이동속도
@@ -161,7 +192,9 @@ export const CLASS_STATS: Record<UnitType, StatBase> = {
   spear: { hp: 68, mp: 10, atk: 13, def: 2, speed: 82 },
   goblin: { hp: 50, mp: 0, atk: 14, def: 1, speed: 90 },
   goblinArcher: { hp: 36, mp: 0, atk: 12, def: 0, speed: 86 },
-  oni: { hp: 185, mp: 0, atk: 24, def: 3, speed: 66 }
+  oni: { hp: 185, mp: 0, atk: 24, def: 3, speed: 66 },
+  goblinKing: { hp: 430, mp: 0, atk: 30, def: 5, speed: 70 },
+  oniLord: { hp: 540, mp: 0, atk: 36, def: 7, speed: 58 }
 };
 
 // 레벨업 시 (레벨-1)배 적용되는 성장치. 적(고정 레벨)은 0.
@@ -172,7 +205,9 @@ export const LEVEL_GROWTH: Record<UnitType, StatBase> = {
   spear: { hp: 9, mp: 2, atk: 2, def: 1, speed: 0 },
   goblin: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
   goblinArcher: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
-  oni: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 }
+  oni: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
+  goblinKing: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
+  oniLord: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 }
 };
 
 // 레벨 L→L+1 에 필요한 누적 EXP (index 0 = 1→2). 마지막 값 이후로는 성장 정지.
@@ -187,7 +222,9 @@ export const EXP_REWARD: Record<UnitType, number> = {
   spear: 5,
   goblin: 8,
   goblinArcher: 8,
-  oni: 20
+  oni: 20,
+  goblinKing: 120,
+  oniLord: 160
 };
 
 // 피해 계산: dmg = max(1, atk - def * DAMAGE.defFactor)
@@ -222,7 +259,7 @@ export interface SquadDef {
   composition: { type: UnitType; count: number }[];
 }
 
-// 이번 전투 편성: 아군 2개 부대(42) vs 적 2개 무리(45) = 87
+// 이번 전투 편성: 아군 2개 부대(42) vs 적 2개 무리(보스 포함 47) = 89
 export const SQUADS: SquadDef[] = [
   {
     id: 0,
@@ -256,6 +293,7 @@ export const SQUADS: SquadDef[] = [
     tint: 0xffffff,
     banner: 0xd23b3b,
     composition: [
+      { type: 'goblinKing', count: 1 },
       { type: 'goblin', count: 17 },
       { type: 'goblinArcher', count: 6 }
     ]
@@ -267,11 +305,62 @@ export const SQUADS: SquadDef[] = [
     tint: 0xffd8c6,
     banner: 0xe0803b,
     composition: [
+      { type: 'oniLord', count: 1 },
       { type: 'goblin', count: 16 },
       { type: 'oni', count: 6 }
     ]
   }
 ];
+
+// 어느 병종이 무리의 보스인지 (하단 정보창 강조/보스 마크/투항 유발)
+export const BOSS_TYPES: UnitType[] = ['goblinKing', 'oniLord'];
+
+// ============================================================
+// 부대 전술 명령 (원작 부대 지휘 참고 확장)
+// 돌격(공격) / 정지(대기) / 이동(집결) / 후퇴 / 탈출
+// ============================================================
+export type SquadOrder = 'charge' | 'hold' | 'move' | 'retreat' | 'escape';
+
+export const ORDER_NAME: Record<SquadOrder, string> = {
+  charge: '돌격',
+  hold: '정지',
+  move: '이동',
+  retreat: '후퇴',
+  escape: '탈출'
+};
+
+// 명령 버튼 표시 순서 (모바일/데스크톱 공통)
+export const ORDER_LIST: SquadOrder[] = ['charge', 'hold', 'move', 'retreat', 'escape'];
+
+// 데스크톱 단축키: Z/X/C/V/B = 돌격/정지/이동/후퇴/탈출 (WASD 이동과 겹치지 않게)
+export const ORDER_KEYS: Record<string, SquadOrder> = {
+  Z: 'charge',
+  X: 'hold',
+  C: 'move',
+  V: 'retreat',
+  B: 'escape'
+};
+
+export const TACTICS = {
+  arriveDist: 42, // 이동 명령 도착 판정 반경
+  arriveSquadDist: 90, // 부대 중심이 목표에 이만큼 접근하면 "도착"으로 보고 정지 전환
+  retreatX: 220, // 후퇴 시 물러나 멈추는 아군측 x 라인
+  escapeEdgeX: 40, // 탈출: 이 x 이하 도달 시 전장에서 이탈(제거)
+  escapeReactRange: 0 // 탈출 중에는 교전하지 않음
+};
+
+// ============================================================
+// 투항 시스템 (원작 특징: 열세에 몰린 적병이 항복 → 아군 편입)
+// ============================================================
+export const SURRENDER = {
+  hpThreshold: 0.3, // 자기 HP 비율 이 미만
+  factionRatioThreshold: 0.5, // 자기 진영 잔존율 이 미만
+  baseChancePerTick: 0.003, // 상시 AI 틱당 투항 확률
+  bossDeathInstant: 0.4, // 보스 사망 시 즉시 1회 판정 확률
+  bossDeathMultiplier: 10, // 보스 사망 이후 상시 확률 배수
+  poseMs: 1000, // 백기 → 아군 전환까지 무기 내려놓는 정지 시간
+  convertTint: 0x6a9cff // 투항병 재틴트 (파랑 계열)
+};
 
 // 대형 & 진군
 export const FORMATION = {

@@ -1,7 +1,7 @@
 import { Unit, BattleContext, CombatStats } from './Unit';
-import { MONSTER } from '../config';
+import { MONSTER, BOSS_TYPES } from '../config';
 
-export type MonsterKind = 'goblin' | 'goblinArcher' | 'oni';
+export type MonsterKind = 'goblin' | 'goblinArcher' | 'oni' | 'goblinKing' | 'oniLord';
 
 export function monsterTexKey(kind: MonsterKind, squadId: number) {
   return `u_${kind}_${squadId}`;
@@ -18,10 +18,11 @@ export class Monster extends Unit {
       unitType: kind,
       squadId,
       knockback: s.knockback,
-      particleColor: kind === 'oni' ? 0xd23b3b : 0x6bbf4a
+      particleColor: kind === 'oni' || kind === 'oniLord' ? 0xd23b3b : 0x6bbf4a
     });
     this.kind = kind;
-    this.setDepth(kind === 'oni' ? 9 : 7);
+    this.isBoss = BOSS_TYPES.includes(kind);
+    this.setDepth(this.isBoss ? 11 : kind === 'oni' ? 9 : 7);
   }
 
   private stats(): CombatStats {
@@ -39,7 +40,10 @@ export class Monster extends Unit {
   aiTick(dt: number, ctx: BattleContext): void {
     if (!this.alive) return;
     this.updateFlash(ctx);
-    if (this.kind === 'goblinArcher') this.combatRanged(dt, ctx, this.stats());
-    else this.combatMelee(dt, ctx, this.stats());
+    // 적 일반병(투항 전): 열세 시 투항 판정. 보스/이미 아군 편입된 유닛은 제외.
+    if (this.faction === 'enemy' && !this.isBoss && this.surrenderState === 'none') {
+      ctx.maybeSurrender(this);
+    }
+    this.combat(dt, ctx, this.stats(), this.kind === 'goblinArcher');
   }
 }

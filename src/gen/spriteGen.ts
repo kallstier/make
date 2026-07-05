@@ -108,7 +108,9 @@ export type UnitKind =
   | 'hero'
   | 'goblin'
   | 'goblinArcher'
-  | 'oni';
+  | 'oni'
+  | 'goblinKing'
+  | 'oniLord';
 
 interface UnitShape {
   gw: number;
@@ -122,7 +124,9 @@ const SHAPES: Record<UnitKind, UnitShape> = {
   hero: { gw: 20, gh: 20 },
   goblin: { gw: 16, gh: 15 },
   goblinArcher: { gw: 16, gh: 15 },
-  oni: { gw: 24, gh: 24 }
+  oni: { gw: 24, gh: 24 },
+  goblinKing: { gw: 26, gh: 26 },
+  oniLord: { gw: 28, gh: 28 }
 };
 
 // 병종별 팔레트 (손으로 고른 상수)
@@ -217,6 +221,34 @@ export const UNIT_PALETTES: Record<UnitKind, UnitPalette> = {
     metalDark: 0xb0801a,
     accent: 0x101018,
     accentShade: 0x000000
+  },
+  // 고블린 킹: 진한 초록 거구 + 황금 왕관 + 대형 몽둥이
+  goblinKing: {
+    outline: 0x0a160a,
+    skin: 0x4f9e34,
+    skinShade: 0x2f6a1e,
+    body: 0x6b3a22,
+    bodyShade: 0x462213,
+    gear: 0xffd23b, // 왕관 금색
+    gearShade: 0xc79a12,
+    metal: 0x9a7a4a, // 몽둥이 나무
+    metalDark: 0x5a4426,
+    accent: 0x8a2a20, // 왕의 망토
+    accentShade: 0x561510
+  },
+  // 오니 대장: 기존 오니보다 진한 붉은 피부 + 검은 투구 + 대형 철퇴
+  oniLord: {
+    outline: 0x1e0707,
+    skin: 0xc0342a,
+    skinShade: 0x821c16,
+    body: 0x272338,
+    bodyShade: 0x14111f,
+    gear: 0x2a2a3a, // 투구(검붉은 철)
+    gearShade: 0x151520,
+    metal: 0xffe070,
+    metalDark: 0x9a6a12,
+    accent: 0xd23b3b,
+    accentShade: 0x8a1f1f
   }
 };
 
@@ -256,6 +288,14 @@ function drawHumanoid(g: Grid, kind: UnitKind, P: UnitPalette, frame: number) {
   // 헤드/보디 세팅 (병종별)
   if (kind === 'oni') {
     drawOni(g, P, frame, cx, groundY, attack);
+    return;
+  }
+  if (kind === 'goblinKing') {
+    drawGoblinKing(g, P, frame, cx, groundY, attack);
+    return;
+  }
+  if (kind === 'oniLord') {
+    drawOniLord(g, P, frame, cx, groundY, attack);
     return;
   }
   if (kind === 'hero') {
@@ -497,11 +537,138 @@ function drawOni(g: Grid, P: UnitPalette, frame: number, cx: number, groundY: nu
   }
 }
 
+function drawGoblinKing(g: Grid, P: UnitPalette, frame: number, cx: number, groundY: number, attack: boolean) {
+  // 26x26 초록 거구 + 왕관 + 대형 몽둥이
+  const headCY = 7;
+  const headR = 5;
+  const bodyTop = headCY + headR - 1;
+  const bodyBot = groundY - 5;
+  const bodyW = 11;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  // 망토 (뒤 왼쪽)
+  g.rect(bodyX - 2, bodyTop, 3, bodyBot - bodyTop + 3, P.accent);
+  g.vline(bodyX - 2, bodyTop, bodyBot + 1, P.accentShade);
+
+  // 굵은 다리
+  const [lo, ro] = legOffsets(frame);
+  const legLen = groundY - bodyBot;
+  g.rect(cx - 4, bodyBot + lo, 4, legLen - lo, P.skinShade);
+  g.rect(cx + 1, bodyBot + ro, 4, legLen - ro, P.skin);
+  g.rect(cx - 5, groundY, 5, 1, P.outline);
+  g.rect(cx + 1, groundY, 5, 1, P.outline);
+
+  // 몸통 (가죽 갑옷) + 배
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.body);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.bodyShade);
+  g.disc(cx, bodyTop + 4, 5, P.skin); // 드러난 배
+  g.set(cx + 3, bodyTop + 5, P.skinShade);
+
+  // 머리 + 큰 귀
+  g.disc(cx, headCY, headR, P.skin);
+  g.set(cx - headR - 1, headCY, P.skin);
+  g.set(cx - headR - 2, headCY - 1, P.skinShade);
+  g.set(cx + headR + 1, headCY, P.skin);
+  g.set(cx + headR + 2, headCY - 1, P.skinShade);
+  g.rect(cx + 1, headCY, 1, 2, P.outline); // 눈
+  g.rect(cx - 2, headCY, 1, 2, P.outline);
+  g.rect(cx - 1, headCY + 2, 3, 1, P.skinShade); // 험상궂은 입
+  g.set(cx - 1, headCY + 2, P.metal); // 송곳니
+  g.set(cx + 1, headCY + 2, P.metal);
+
+  // 황금 왕관
+  const crownY = headCY - headR - 1;
+  g.rect(cx - headR + 1, crownY, headR * 2 - 1, 2, P.gear);
+  g.vline(cx - headR + 1, crownY, crownY + 1, P.gearShade);
+  for (let i = -headR + 2; i <= headR - 2; i += 2) {
+    g.set(cx + i, crownY - 1, P.gear); // 뾰족한 첨탑
+    g.set(cx + i, crownY - 2, P.metal);
+  }
+  g.set(cx, crownY - 2, 0xff5a5a); // 중앙 보석
+
+  // 대형 몽둥이 (오른손)
+  const armY = bodyTop + 2;
+  if (attack) {
+    g.line(cx + 3, armY, cx + 10, armY - 7, P.metalDark);
+    g.disc(cx + 10, armY - 8, 3, P.metal);
+    g.set(cx + 11, armY - 9, P.gearShade);
+    g.set(cx + 8, armY - 6, P.metalDark);
+  } else {
+    g.line(cx + 5, bodyBot, cx + 9, headCY - 6, P.metalDark);
+    g.disc(cx + 9, headCY - 8, 3, P.metal);
+    g.set(cx + 10, headCY - 9, P.gearShade);
+  }
+}
+
+function drawOniLord(g: Grid, P: UnitPalette, frame: number, cx: number, groundY: number, attack: boolean) {
+  // 28x28 진홍 거구 + 검은 투구(뿔) + 대형 철퇴
+  const headCY = 7;
+  const headR = 5;
+  const bodyTop = headCY + headR - 1;
+  const bodyBot = groundY - 6;
+  const bodyW = 13;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  // 굵은 다리
+  const [lo, ro] = legOffsets(frame);
+  const legLen = groundY - bodyBot;
+  g.rect(cx - 5, bodyBot + lo, 4, legLen - lo, P.skinShade);
+  g.rect(cx + 2, bodyBot + ro, 4, legLen - ro, P.skin);
+  g.rect(cx - 6, groundY, 5, 1, P.outline);
+  g.rect(cx + 2, groundY, 5, 1, P.outline);
+
+  // 몸통 (근육 + 허리천)
+  g.disc(cx, bodyTop + 5, 7, P.skin);
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.skin);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.skinShade);
+  g.rect(bodyX, bodyBot - 4, bodyW, 4, P.body); // 허리천
+  g.vline(bodyX + bodyW - 1, bodyBot - 4, bodyBot - 1, P.bodyShade);
+  g.rect(cx - 3, bodyTop + 2, 6, 1, P.accentShade); // 가슴 흉터
+
+  // 머리
+  g.disc(cx, headCY, headR, P.skin);
+  g.set(cx + headR - 1, headCY + 1, P.skinShade);
+  g.rect(cx - 3, headCY + 1, 2, 1, P.gear); // 눈(어두운 투구 그늘 아래 번뜩임)
+  g.rect(cx + 2, headCY + 1, 2, 1, P.gear);
+  g.rect(cx - 3, headCY + 1, 1, 1, 0xffe070);
+  g.rect(cx + 3, headCY + 1, 1, 1, 0xffe070);
+  g.rect(cx - 2, headCY + 3, 5, 1, P.accent); // 입/이빨
+  g.set(cx - 2, headCY + 3, P.metal);
+  g.set(cx, headCY + 3, P.metal);
+  g.set(cx + 2, headCY + 3, P.metal);
+
+  // 검은 투구 (이마 덮개) + 금속 뿔
+  g.disc(cx, headCY - 1, headR, P.gear);
+  g.rect(cx - headR, headCY + 1, headR * 2 + 1, 1, P.gearShade); // 투구 챙
+  g.rect(cx - 3, headCY + 1, 7, 1, P.skin); // 얼굴 노출
+  g.line(cx - 4, headCY - headR + 1, cx - 6, headCY - headR - 3, P.metal);
+  g.line(cx + 4, headCY - headR + 1, cx + 6, headCY - headR - 3, P.metal);
+  g.set(cx - 6, headCY - headR - 3, P.metalDark);
+  g.set(cx + 6, headCY - headR - 3, P.metalDark);
+  g.set(cx, headCY - headR - 1, 0xffe070); // 투구 중앙 장식
+
+  // 대형 철퇴 (오른손)
+  const armY = bodyTop + 2;
+  if (attack) {
+    g.line(cx + 4, armY, cx + 11, armY - 7, P.metalDark);
+    g.rect(cx + 9, armY - 11, 4, 5, P.metal);
+    g.set(cx + 8, armY - 11, P.gear);
+    g.set(cx + 13, armY - 7, P.gear);
+    g.set(cx + 10, armY - 12, P.gear);
+  } else {
+    g.line(cx + 5, bodyBot, cx + 9, headCY - 6, P.metalDark);
+    g.rect(cx + 7, headCY - 10, 4, 5, P.metal);
+    g.set(cx + 6, headCY - 10, P.gear);
+    g.set(cx + 11, headCY - 6, P.gear);
+  }
+}
+
 function drawCorpse(g: Grid, kind: UnitKind, P: UnitPalette) {
   const { gw, gh } = SHAPES[kind];
   const cx = Math.floor(gw / 2);
   const y = gh - 2;
-  const len = kind === 'oni' ? 9 : kind === 'hero' ? 7 : 5;
+  const len =
+    kind === 'oniLord' ? 11 : kind === 'goblinKing' ? 10 : kind === 'oni' ? 9 : kind === 'hero' ? 7 : 5;
   // 쓰러진 몸통
   g.rect(cx - len, y - 1, len * 2, 2, P.body);
   g.rect(cx - len, y, len * 2, 1, P.bodyShade);
@@ -578,6 +745,59 @@ export function genBanner(scene: Phaser.Scene, key: string, color: number) {
   g.rect(3, 3, 3, 3, 0xffffff); // 문양
   const out = g.outlined(0x101010);
   blit(scene, key, g, out, 2);
+}
+
+// ============================================================
+// 보스 마크 (머리 위 작은 왕관/해골 표식)
+// ============================================================
+export function genBossMark(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(12, 10);
+  // 작은 왕관
+  g.rect(2, 5, 8, 3, 0xffd23b);
+  g.vline(2, 5, 7, 0xc79a12);
+  g.set(2, 3, 0xffd23b);
+  g.set(2, 2, 0xffe070);
+  g.set(5, 2, 0xffd23b);
+  g.set(5, 1, 0xffe070);
+  g.set(8, 3, 0xffd23b);
+  g.set(8, 2, 0xffe070);
+  g.set(5, 6, 0xff5a5a); // 중앙 보석
+  const out = g.outlined(0x2a1e08);
+  blit(scene, key, g, out, 3);
+}
+
+// ============================================================
+// 백기 (투항 표식)
+// ============================================================
+export function genWhiteFlag(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(12, 14);
+  g.vline(2, 0, 13, 0x6a5030); // 깃대
+  for (let y = 1; y <= 7; y++) {
+    const w = 8 - Math.abs(4 - y);
+    g.rect(3, y, w, 1, 0xf4f4f4);
+  }
+  g.set(9, 4, 0xd8d8d8);
+  const out = g.outlined(0x2a2a2a);
+  blit(scene, key, g, out, 2);
+}
+
+// ============================================================
+// 이동 명령 목표 깃발 마커 (부대 배너 색으로 틴트해 사용)
+// ============================================================
+export function genOrderFlag(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(14, 22);
+  g.vline(3, 0, 21, 0x3a2a12); // 긴 깃대
+  g.vline(4, 1, 20, 0x24190b);
+  // 삼각 페넌트 (위가 넓고 아래로 좁아짐)
+  for (let y = 1; y <= 8; y++) {
+    const ww = 9 - y; // y=1 → 8칸, y=8 → 1칸
+    if (ww >= 1) g.rect(5, y, ww, 1, 0xffffff);
+  }
+  const out = g.outlined(0x101010);
+  blit(scene, key, g, out, 3);
 }
 
 // ============================================================

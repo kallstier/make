@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import type { BattleScene, GameState } from './BattleScene';
+import { ORDER_LIST, ORDER_NAME } from '../config';
 
 // UIScene: BattleScene 위에 겹쳐 HUD/정보창/버튼/오버레이 렌더
 export class UIScene extends Phaser.Scene {
@@ -36,6 +37,26 @@ export class UIScene extends Phaser.Scene {
 
   private barY = 0;
   private barH = 120;
+
+  // 부대 명령 패널 (좌상단)
+  private squadPanelG!: Phaser.GameObjects.Graphics;
+  private tabTexts: Phaser.GameObjects.Text[] = [];
+  private tabZones: Phaser.GameObjects.Zone[] = [];
+  private orderTexts: Phaser.GameObjects.Text[] = [];
+  private orderZones: Phaser.GameObjects.Zone[] = [];
+  private moveHintText!: Phaser.GameObjects.Text;
+  private bossBannerText!: Phaser.GameObjects.Text;
+
+  // 부대 명령 패널 레이아웃 상수
+  private readonly TAB_Y = 74;
+  private readonly TAB_W = 118;
+  private readonly TAB_H = 30;
+  private readonly TAB_GAP = 6;
+  private readonly BTN_Y = 110;
+  private readonly BTN_W = 60;
+  private readonly BTN_H = 28;
+  private readonly BTN_GAP = 4;
+  private readonly PANEL_X = 12;
 
   private shownState: GameState | null = null;
 
@@ -148,7 +169,155 @@ export class UIScene extends Phaser.Scene {
       this.battle.requestSkill();
     });
 
+    // 부대 명령 패널 (좌상단, 상단 HUD 아래)
+    this.buildSquadPanel();
+
+    // "적장 격파!" 배너 (보스 처치 이벤트 시 표시)
+    this.bossBannerText = this.add
+      .text(this.scale.width / 2, this.scale.height * 0.34, '', {
+        fontFamily: 'sans-serif',
+        fontSize: '54px',
+        fontStyle: 'bold',
+        color: '#ff5a4a',
+        stroke: '#2a0000',
+        strokeThickness: 9
+      })
+      .setOrigin(0.5)
+      .setDepth(210)
+      .setVisible(false);
+    this.battle.events.on('bossKilled', this.showBossBanner, this);
+
     this.scale.on('resize', () => this.layout());
+  }
+
+  // ---------- 부대 명령 패널 ----------
+  private buildSquadPanel() {
+    this.squadPanelG = this.add.graphics().setDepth(60);
+    this.tabTexts = [];
+    this.tabZones = [];
+    this.orderTexts = [];
+    this.orderZones = [];
+
+    // 부대 탭 2개
+    for (let i = 0; i < 2; i++) {
+      const x = this.PANEL_X + i * (this.TAB_W + this.TAB_GAP);
+      const t = this.add
+        .text(x + this.TAB_W / 2, this.TAB_Y + this.TAB_H / 2, '', {
+          fontFamily: 'sans-serif',
+          fontSize: '13px',
+          fontStyle: 'bold',
+          color: '#ffffff'
+        })
+        .setOrigin(0.5)
+        .setDepth(62);
+      this.tabTexts.push(t);
+      const z = this.add.zone(x + this.TAB_W / 2, this.TAB_Y + this.TAB_H / 2, this.TAB_W, this.TAB_H).setInteractive();
+      z.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
+        e.stopPropagation();
+        this.battle.selectSquadTab(i);
+      });
+      this.tabZones.push(z);
+    }
+
+    // 명령 버튼 5개
+    for (let i = 0; i < ORDER_LIST.length; i++) {
+      const x = this.PANEL_X + i * (this.BTN_W + this.BTN_GAP);
+      const t = this.add
+        .text(x + this.BTN_W / 2, this.BTN_Y + this.BTN_H / 2, ORDER_NAME[ORDER_LIST[i]], {
+          fontFamily: 'sans-serif',
+          fontSize: '13px',
+          fontStyle: 'bold',
+          color: '#ffffff'
+        })
+        .setOrigin(0.5)
+        .setDepth(62);
+      this.orderTexts.push(t);
+      const z = this.add.zone(x + this.BTN_W / 2, this.BTN_Y + this.BTN_H / 2, this.BTN_W, this.BTN_H).setInteractive();
+      z.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
+        e.stopPropagation();
+        this.battle.issueSquadOrder(ORDER_LIST[i]);
+      });
+      this.orderZones.push(z);
+    }
+
+    this.moveHintText = this.add
+      .text(this.PANEL_X, this.BTN_Y + this.BTN_H + 6, '', {
+        fontFamily: 'sans-serif',
+        fontSize: '13px',
+        fontStyle: 'bold',
+        color: '#ffe066',
+        stroke: '#000000',
+        strokeThickness: 3
+      })
+      .setDepth(62);
+  }
+
+  private drawSquadPanel() {
+    const infos = this.battle.getAllySquadInfos();
+    const sel = this.battle.getSelectedSquadTab();
+    const g = this.squadPanelG;
+    g.clear();
+
+    // 탭
+    for (let i = 0; i < this.tabTexts.length; i++) {
+      const info = infos[i];
+      const x = this.PANEL_X + i * (this.TAB_W + this.TAB_GAP);
+      const selected = info && info.selected;
+      g.fillStyle(0x0a1020, selected ? 0.92 : 0.55);
+      g.fillRoundedRect(x, this.TAB_Y, this.TAB_W, this.TAB_H, 6);
+      g.lineStyle(selected ? 3 : 1.5, info ? info.banner : 0x888888, selected ? 1 : 0.7);
+      g.strokeRoundedRect(x, this.TAB_Y, this.TAB_W, this.TAB_H, 6);
+      // 부대 색 배너 점
+      if (info) {
+        g.fillStyle(info.banner, 1);
+        g.fillRect(x + 8, this.TAB_Y + this.TAB_H / 2 - 5, 10, 10);
+      }
+      if (info) {
+        this.tabTexts[i].setText(`${info.name}  ${info.alive}`);
+        this.tabTexts[i].setColor(selected ? '#ffffff' : '#b8c4da');
+        this.tabTexts[i].setPosition(x + this.TAB_W / 2 + 8, this.TAB_Y + this.TAB_H / 2);
+      } else {
+        this.tabTexts[i].setText('');
+      }
+    }
+
+    // 명령 버튼
+    const curOrder = infos[sel] ? infos[sel].order : 'charge';
+    for (let i = 0; i < this.orderTexts.length; i++) {
+      const x = this.PANEL_X + i * (this.BTN_W + this.BTN_GAP);
+      const active = ORDER_LIST[i] === curOrder;
+      g.fillStyle(active ? 0xd23b3b : 0x1a2438, active ? 0.95 : 0.7);
+      g.fillRoundedRect(x, this.BTN_Y, this.BTN_W, this.BTN_H, 5);
+      g.lineStyle(active ? 2.5 : 1, 0xffffff, active ? 0.9 : 0.4);
+      g.strokeRoundedRect(x, this.BTN_Y, this.BTN_W, this.BTN_H, 5);
+      this.orderTexts[i].setColor(active ? '#ffffff' : '#c8d4e8');
+    }
+
+    // 이동 지점 지정 안내
+    if (this.battle.isMoveTargeting()) {
+      this.moveHintText.setVisible(true);
+      this.moveHintText.setText('▶ 집결 지점을 탭하세요');
+    } else {
+      this.moveHintText.setVisible(false);
+    }
+  }
+
+  private showBossBanner(name: string) {
+    const t = this.bossBannerText;
+    t.setPosition(this.scale.width / 2, this.scale.height * 0.34);
+    t.setText(`적장 격파!\n${name}`);
+    t.setAlpha(1);
+    t.setScale(0.6);
+    t.setVisible(true);
+    this.tweens.killTweensOf(t);
+    this.tweens.add({ targets: t, scale: 1, duration: 260, ease: 'Back.Out' });
+    this.tweens.add({
+      targets: t,
+      alpha: 0,
+      delay: 1500,
+      duration: 500,
+      onComplete: () => t.setVisible(false)
+    });
   }
 
   private layout() {
@@ -170,6 +339,7 @@ export class UIScene extends Phaser.Scene {
     this.heroMiniText.setText(`영웅 HP ${hh.hp}/${hh.max}`);
 
     this.drawInfoPanel();
+    this.drawSquadPanel();
 
     const skillEnabled = this.battle.canUseSkill();
     this.drawSkillButton(this.battle.getSkillCdRatio(), skillEnabled);
@@ -220,7 +390,7 @@ export class UIScene extends Phaser.Scene {
     }
 
     const isEnemy = info.faction === 'enemy';
-    const accent = isEnemy ? 0xd23b3b : info.possessed ? 0xffd23b : 0x3b8ef0;
+    const accent = info.isBoss ? 0xff3020 : isEnemy ? 0xd23b3b : info.possessed ? 0xffd23b : 0x3b8ef0;
 
     // 얼굴 아이콘 박스 (1단 높이)
     const boxX = 12;
@@ -247,12 +417,31 @@ export class UIScene extends Phaser.Scene {
     const tx = boxX + boxS + 14;
     this.nameText.setPosition(tx, y + 8);
     this.nameText.setText(info.label);
-    this.nameText.setColor(isEnemy ? '#ff9a9a' : '#ffffff');
+    this.nameText.setColor(info.isBoss ? '#ff5040' : isEnemy ? '#ff9a9a' : info.surrendered ? '#8fc0ff' : '#ffffff');
+    this.nameText.setFontStyle('bold');
 
-    // 빙의/소속 태그는 이름 행 우측에
+    // 빙의/소속/보스/투항 태그는 이름 행 우측에
     this.tagText.setPosition(tx + 190, y + 10);
-    this.tagText.setText(info.possessed ? '● 빙의 중' : isEnemy ? '적' : '아군');
-    this.tagText.setColor(info.possessed ? '#ffe066' : isEnemy ? '#ff8080' : '#8fc0ff');
+    let tag: string;
+    let tagColor: string;
+    if (info.isBoss) {
+      tag = '☠ 적장(보스)';
+      tagColor = '#ff5040';
+    } else if (info.surrendered) {
+      tag = '⚑ 투항병';
+      tagColor = '#8fc0ff';
+    } else if (info.possessed) {
+      tag = '● 빙의 중';
+      tagColor = '#ffe066';
+    } else if (isEnemy) {
+      tag = '적';
+      tagColor = '#ff8080';
+    } else {
+      tag = '아군';
+      tagColor = '#8fc0ff';
+    }
+    this.tagText.setText(tag);
+    this.tagText.setColor(tagColor);
 
     this.lvClassText.setPosition(tx, y + 30);
     this.lvClassText.setText(`LV ${info.level}  ${info.typeName}`);
@@ -346,12 +535,18 @@ export class UIScene extends Phaser.Scene {
     dim.fillRect(0, 0, w, h);
     cont.add(dim);
 
-    const win = state === 'win';
-    const title = this.add.text(w / 2, h * 0.26, win ? '승리!' : '패배...', {
+    const titleInfo: Record<GameState, { text: string; color: string }> = {
+      playing: { text: '', color: '#ffffff' },
+      win: { text: '승리!', color: '#ffe066' },
+      lose: { text: '패배...', color: '#ff6b6b' },
+      escape: { text: '탈출', color: '#7ad0ff' }
+    };
+    const ti = titleInfo[state];
+    const title = this.add.text(w / 2, h * 0.24, ti.text, {
       fontFamily: 'sans-serif',
       fontSize: '64px',
       fontStyle: 'bold',
-      color: win ? '#ffe066' : '#ff6b6b',
+      color: ti.color,
       stroke: '#000',
       strokeThickness: 8
     });
@@ -359,17 +554,28 @@ export class UIScene extends Phaser.Scene {
     cont.add(title);
 
     const res = this.battle.getResult();
+    if (state === 'escape' && res) {
+      const sub = this.add.text(w / 2, h * 0.34, '부대가 전장을 이탈했습니다 — 다음 거점으로 귀환', {
+        fontFamily: 'sans-serif',
+        fontSize: '18px',
+        color: '#bcd8ea'
+      });
+      sub.setOrigin(0.5);
+      cont.add(sub);
+    }
     const lines = res
       ? [
           `아군 전사: ${res.allyDead}`,
           `적 전사: ${res.enemyDead}`,
           `영웅 처치: ${res.heroKills}`,
-          `빙의 유닛 처치: ${res.playerKills}`
+          `빙의 처치: ${res.playerKills}`,
+          `투항 영입: ${res.surrenderedGained}`,
+          `탈출 생존: ${res.escapees.length}`
         ]
       : [];
     const stat = this.add.text(w / 2, h * 0.46, lines.join('     '), {
       fontFamily: 'monospace',
-      fontSize: '20px',
+      fontSize: '18px',
       color: '#e6eefb',
       align: 'center'
     });

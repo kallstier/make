@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
-import type { UnitType } from '../config';
-import { CROWD, CONTROL, LEVELUP, DAMAGE, EXP_REWARD, MAX_LEVEL } from '../config';
+import type { UnitType, SquadOrder } from '../config';
+import { CROWD, CONTROL, LEVELUP, DAMAGE, EXP_REWARD, MAX_LEVEL, TACTICS } from '../config';
 import { FRAME } from '../gen/spriteGen';
 import type { Equipment } from '../rpg/items';
 import { makeEquipment, itemProc } from '../rpg/items';
@@ -27,6 +27,10 @@ export interface BattleContext {
   explodeAt(x: number, y: number, radius: number, damage: number, faction: Faction, attacker: Unit | null): void;
   applyStun(target: Unit, ms: number): void;
   spawnLevelUpText(x: number, y: number): void;
+  // 진영 잔존율 (0..1). 투항 판정에서 열세 여부 계산에 사용.
+  factionRatio(faction: Faction): number;
+  // 적 일반병 투항 판정 위임 (씬이 확률/전환을 처리). 보스는 제외.
+  maybeSurrender(unit: Unit): void;
 }
 
 // 병종별 전투 수치 (combatMelee/combatRanged 공용)
@@ -76,6 +80,19 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
   label = '';
 
   alive = true;
+
+  // ---- 보스 / 투항 / 전술 명령 상태 ----
+  isBoss = false;
+  // 부대 전술 명령. 적/기본은 'charge'(자유 교전).
+  order: SquadOrder = 'charge';
+  orderPoint: { x: number; y: number } | null = null; // '이동' 명령 목표 지점
+  // 투항 상태: none(교전 중) → surrendering(백기·정지) → converted(아군 편입)
+  surrenderState: 'none' | 'surrendering' | 'converted' = 'none';
+  surrendered = false; // 투항병 태그 표시용 (converted 이후 true 유지)
+  surrenderReadyAt = 0; // 이 시각(ms) 이후 백기 → 아군 전환 (씬이 처리)
+  escaped = false; // 탈출로 전장을 이탈(제거)했는지
+  // 투항 후 재틴트 색 (있으면 flash 해제 시 이 색으로 복원)
+  convertTint: number | null = null;
 
   // 플레이어 조작(빙의) 상태 및 이동 입력 벡터
   playerControlled = false;
@@ -257,7 +274,15 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
     if (this.flashUntil && ctx.time > this.flashUntil) {
       this.flashUntil = 0;
       this.clearTint();
+      // 투항병은 피격 백색 플래시 뒤 파랑 재틴트 복원
+      if (this.convertTint !== null) this.setTint(this.convertTint);
     }
+  }
+
+  // 투항 → 아군 전환 시 파랑 계열 재틴트 (피격 flash 이후에도 유지)
+  applyConvertTint(tint: number) {
+    this.convertTint = tint;
+    this.setTint(tint);
   }
 
   // HP바를 씬의 공용 Graphics에 그린다 (배치 렌더 — 유닛별 Graphics 미사용)
@@ -455,6 +480,125 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
       this.halt();
       this.animateWalk(dt, false);
     }
+  }
+
+  // ---------- 전술 명령 인지 전투 디스패처 ----------
+  // 부대 명령에 따라 교전 방식을 바꾼다. 'charge'(기본)는 기존 자유 교전.
+  // 적/미지정 유닛은 항상 'charge'로 동작한다.
+  protected combat(dt: number, ctx: BattleContext, s: CombatStats, ranged: boolean) {
+    // 투항 진행 중: 무기 내려놓고 정지 (씬이 전환 타이머 관리)
+    if (this.surrenderState === 'surrendering') {
+      this.halt();
+      this.animateWalk(dt, false);
+      return;
+    }
+    switch (this.order) {
+      case 'hold':
+        this.orderHold(dt, ctx, s, ranged);
+        return;
+      case 'move':
+        this.orderMove(dt, ctx);
+        return;
+      case 'retreat':
+        this.orderRetreat(dt, ctx, s, ranged);
+        return;
+      case 'escape':
+        this.orderEscape(dt, ctx);
+        return;
+      default:
+        if (ranged) this.combatRanged(dt, ctx, s);
+        else this.combatMelee(dt, ctx, s);
+    }
+  }
+
+  // 정지(대기): 제자리 유지. 근접 사거리 안에 든 적에게만 반격.
+  private orderHold(dt: number, ctx: BattleContext, s: CombatStats, ranged: boolean) {
+    this.halt();
+    if (this.isStunned(ctx) || !ctx.combatActive()) {
+      this.animateWalk(dt, false);
+      return;
+    }
+    const reach = ranged ? s.attackRange : s.attackRange + 10;
+    const e = this.seekTarget(ctx, reach);
+    if (!e) {
+      this.animateWalk(dt, false);
+      return;
+    }
+    const d = Math.hypot(e.x - this.x, e.y - this.y);
+    if (ranged) {
+      if (d <= s.attackRange && ctx.time - this.lastAttack >= s.attackCooldown) {
+        this.lastAttack = ctx.time;
+        ctx.spawnProjectile(this.x, this.y - this.height * 0.28, e, s.attackDamage, this.faction, s.projectileSpeed ?? 420);
+        this.setFlipX(e.x < this.x);
+      }
+      this.animateWalk(dt, false);
+    } else {
+      if (d <= s.attackRange && ctx.time - this.lastAttack >= s.attackCooldown) {
+        this.lastAttack = ctx.time;
+        this.dealMelee(ctx, e);
+        this.attackVisual(ctx, e.x, e.y);
+      } else {
+        this.animateWalk(dt, false);
+      }
+    }
+  }
+
+  // 이동(집결): 교전 회피하며 목표 지점으로 이동. 도착은 씬이 판정해 'hold'로 전환.
+  private orderMove(dt: number, ctx: BattleContext) {
+    if (this.isStunned(ctx)) {
+      this.halt();
+      this.animateWalk(dt, false);
+      return;
+    }
+    const p = this.orderPoint;
+    if (!p) {
+      this.halt();
+      this.animateWalk(dt, false);
+      return;
+    }
+    const moving = this.moveToward(p.x, p.y, TACTICS.arriveDist);
+    this.animateWalk(dt, moving);
+  }
+
+  // 후퇴: 아군측(좌측) 라인으로 물러남. 쫓아온 적이 사거리에 들면 싸우며 후퇴.
+  private orderRetreat(dt: number, ctx: BattleContext, s: CombatStats, ranged: boolean) {
+    if (this.isStunned(ctx)) {
+      this.halt();
+      this.animateWalk(dt, false);
+      return;
+    }
+    // 반격 (이동은 계속)
+    const e = this.seekTarget(ctx, ranged ? s.attackRange : s.attackRange + 10);
+    if (e) {
+      const d = Math.hypot(e.x - this.x, e.y - this.y);
+      if (d <= s.attackRange && ctx.time - this.lastAttack >= s.attackCooldown) {
+        this.lastAttack = ctx.time;
+        if (ranged) {
+          ctx.spawnProjectile(this.x, this.y - this.height * 0.28, e, s.attackDamage, this.faction, s.projectileSpeed ?? 420);
+        } else {
+          this.dealMelee(ctx, e);
+          this.attackVisual(ctx, e.x, e.y);
+        }
+      }
+    }
+    // 이동: 좌측 후퇴 라인까지 물러난 뒤 정지 유지
+    if (this.x > TACTICS.retreatX) {
+      this.dvx = -this.speed;
+      this.dvy = 0;
+      this.setFlipX(true);
+      this.animateWalk(dt, true);
+    } else {
+      this.halt();
+      this.animateWalk(dt, false);
+    }
+  }
+
+  // 탈출: 좌측 전장 가장자리로 이탈. 교전하지 않음. 가장자리 도달 제거는 씬이 처리.
+  private orderEscape(dt: number, _ctx: BattleContext) {
+    this.dvx = -this.speed;
+    this.dvy = 0;
+    this.setFlipX(true);
+    this.animateWalk(dt, true);
   }
 
   abstract aiTick(dt: number, ctx: BattleContext): void;

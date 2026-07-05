@@ -16,6 +16,9 @@ import {
   genExplosionRing,
   genFireShard,
   genItemIcon,
+  genBossMark,
+  genWhiteFlag,
+  genOrderFlag,
   UnitKind
 } from '../gen/spriteGen';
 
@@ -45,6 +48,9 @@ export class BootScene extends Phaser.Scene {
     genTree(this, 'tree');
     genRock(this, 'rock');
     genBush(this, 'bush');
+    genBossMark(this, 'bossMark');
+    genWhiteFlag(this, 'whiteFlag');
+    genOrderFlag(this, 'orderFlag');
 
     // 장비 슬롯 아이콘 (하단 정보창)
     for (const slot of EQUIP_SLOTS) genItemIcon(this, SLOT_ICON[slot], slot);

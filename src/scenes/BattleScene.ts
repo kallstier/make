@@ -13,7 +13,12 @@ import {
   SKILL,
   CLASS_NAME,
   UnitType,
-  SquadDef
+  SquadDef,
+  SquadOrder,
+  ORDER_KEYS,
+  TACTICS,
+  SURRENDER,
+  BOSS_TYPES
 } from '../config';
 import { Unit, Faction, BattleContext } from '../units/Unit';
 import { Hero } from '../units/Hero';
@@ -26,7 +31,7 @@ import { FRAME } from '../gen/spriteGen';
 import { EQUIP_SLOTS, SLOT_ICON, SLOT_NAME, itemProc, EquipSlot } from '../rpg/items';
 import { expForNext } from '../rpg/stats';
 
-export type GameState = 'playing' | 'win' | 'lose';
+export type GameState = 'playing' | 'win' | 'lose' | 'escape';
 
 const TYPE_NAME = CLASS_NAME;
 
@@ -44,6 +49,18 @@ interface SquadRuntime {
   def: SquadDef;
   members: Unit[];
   banner: Phaser.GameObjects.Image;
+  order: SquadOrder;
+  movePoint: { x: number; y: number } | null;
+  orderFlag: Phaser.GameObjects.Image; // '이동' 목표 깃발 (ally 전용)
+  bossDead: boolean; // 이 무리의 보스가 죽었는지 (투항 확률 상승)
+}
+
+// 탈출/생존 기록 (다음 라운드 전략층이 소비할 데이터)
+export interface Survivor {
+  label: string;
+  unitType: UnitType;
+  level: number;
+  squadId: number;
 }
 
 interface Spawn {
@@ -55,10 +72,15 @@ interface Spawn {
 
 export interface BattleResult {
   win: boolean;
+  outcome: GameState; // 'win' | 'lose' | 'escape'
   allyDead: number;
   enemyDead: number;
   heroKills: number;
   playerKills: number;
+  surrenderedGained: number; // 투항 영입 수
+  escapees: Survivor[]; // 탈출 생존자 (다음 라운드 "귀환"에 사용)
+  // 부대별 생존 요약 (전략층으로 이월)
+  squadSurvivors: { squadId: number; name: string; alive: number; escaped: number }[];
 }
 
 export class BattleScene extends Phaser.Scene {
@@ -79,6 +101,15 @@ export class BattleScene extends Phaser.Scene {
     right: Phaser.Input.Keyboard.Key;
     space: Phaser.Input.Keyboard.Key;
     tab: Phaser.Input.Keyboard.Key;
+  };
+  private squadKeys!: {
+    sel1: Phaser.Input.Keyboard.Key;
+    sel2: Phaser.Input.Keyboard.Key;
+    q: Phaser.Input.Keyboard.Key;
+    w: Phaser.Input.Keyboard.Key;
+    e: Phaser.Input.Keyboard.Key;
+    r: Phaser.Input.Keyboard.Key;
+    t: Phaser.Input.Keyboard.Key;
   };
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
 
@@ -109,6 +140,19 @@ export class BattleScene extends Phaser.Scene {
   private playerKills = 0;
   private result: BattleResult | null = null;
 
+  // 부대 명령 UI 상태 (선택된 아군 부대 탭 / 이동 지점 지정 모드)
+  private selectedSquadTab = 0; // ally 부대 인덱스 (0,1)
+  private pendingMoveSquad: number | null = null; // '이동' 지점 탭 대기 중인 squadId
+
+  // 투항/탈출 통계
+  private surrenderedGained = 0;
+  private escapees: Survivor[] = [];
+  private heroEscaped = false;
+
+  // 보스 머리 위 마크 / 투항 백기 (uid → 이미지)
+  private bossMarks = new Map<number, Phaser.GameObjects.Image>();
+  private surrenderFlags = new Map<number, Phaser.GameObjects.Image>();
+
   // FX 풀
   private dmgPool: Phaser.GameObjects.Text[] = [];
   private sparkPool: Phaser.GameObjects.Image[] = [];
@@ -132,6 +176,13 @@ export class BattleScene extends Phaser.Scene {
     this.enemyDead = 0;
     this.playerKills = 0;
     this.result = null;
+    this.selectedSquadTab = 0;
+    this.pendingMoveSquad = null;
+    this.surrenderedGained = 0;
+    this.escapees = [];
+    this.heroEscaped = false;
+    this.bossMarks = new Map();
+    this.surrenderFlags = new Map();
     this.battleStartTime = this.time.now;
 
     this.physics.world.setBounds(0, 0, WORLD.width, WORLD.height);
@@ -172,7 +223,9 @@ export class BattleScene extends Phaser.Scene {
       rallyPoint: (f) => (f === 'ally' ? this.enemyCentroid : this.allyCentroid),
       explodeAt: (x, y, r, dmg, f, atk) => this.explodeAt(x, y, r, dmg, f, atk),
       applyStun: (t, ms) => this.applyStun(t, ms),
-      spawnLevelUpText: (x, y) => this.spawnLevelUpText(x, y)
+      spawnLevelUpText: (x, y) => this.spawnLevelUpText(x, y),
+      factionRatio: (f) => this.factionRatio(f),
+      maybeSurrender: (u) => this.maybeSurrender(u)
     };
 
     // 부대 편성 스폰
@@ -235,6 +288,15 @@ export class BattleScene extends Phaser.Scene {
       space: kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
       tab: kb.addKey(Phaser.Input.Keyboard.KeyCodes.TAB)
     };
+    this.squadKeys = {
+      sel1: kb.addKey(Phaser.Input.Keyboard.KeyCodes.ONE),
+      sel2: kb.addKey(Phaser.Input.Keyboard.KeyCodes.TWO),
+      q: kb.addKey(Phaser.Input.Keyboard.KeyCodes.Q),
+      w: kb.addKey(Phaser.Input.Keyboard.KeyCodes.W),
+      e: kb.addKey(Phaser.Input.Keyboard.KeyCodes.E),
+      r: kb.addKey(Phaser.Input.Keyboard.KeyCodes.R),
+      t: kb.addKey(Phaser.Input.Keyboard.KeyCodes.T)
+    };
     kb.addCapture('TAB');
     this.input.on('pointerdown', this.onPointerDown, this);
     this.input.on('pointerup', this.onPointerUp, this);
@@ -268,7 +330,9 @@ export class BattleScene extends Phaser.Scene {
     // 부대 런타임 준비
     for (const def of SQUADS) {
       const banner = this.add.image(0, 0, `banner_${def.id}`).setDepth(14).setVisible(false);
-      this.squads.push({ def, members: [], banner });
+      const orderFlag = this.add.image(0, 0, 'orderFlag').setOrigin(0.5, 1).setDepth(13).setVisible(false);
+      orderFlag.setTint(def.banner);
+      this.squads.push({ def, members: [], banner, order: 'charge', movePoint: null, orderFlag, bossDead: false });
     }
 
     const labelCount = new Map<string, number>();
@@ -278,9 +342,20 @@ export class BattleScene extends Phaser.Scene {
       const key = `${sp.squadId}_${sp.type}`;
       const idx = (labelCount.get(key) ?? 0) + 1;
       labelCount.set(key, idx);
-      u.label = sp.type === 'hero' ? `${sqName} 영웅` : `${sqName} ${TYPE_NAME[sp.type]} #${idx}`;
+      if (sp.type === 'hero') u.label = `${sqName} 영웅`;
+      else if (BOSS_TYPES.includes(sp.type)) u.label = `【보스】 ${TYPE_NAME[sp.type]}`;
+      else u.label = `${sqName} ${TYPE_NAME[sp.type]} #${idx}`;
       this.squads[this.squads.findIndex((r) => r.def.id === sp.squadId)].members.push(u);
+      // 보스 머리 위 마크 (왕관/해골)
+      if (u.isBoss) {
+        const mark = this.add.image(u.x, u.y, 'bossMark').setDepth(15);
+        this.bossMarks.set(u.uid, mark);
+      }
     }
+  }
+
+  private allySquads(): SquadRuntime[] {
+    return this.squads.filter((s) => s.def.faction === 'ally');
   }
 
   private layoutFaction(squads: SquadDef[], faction: Faction): Spawn[] {
@@ -364,6 +439,12 @@ export class BattleScene extends Phaser.Scene {
     const moved = Math.hypot(pointer.x - this.tapDownX, pointer.y - this.tapDownY);
     if (dur > TAP.maxDurationMs || moved > TAP.maxMoveDist) return;
     const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    // '이동' 지점 지정 모드: 이 탭은 유닛 선택/빙의가 아니라 집결 지점으로 해석
+    if (this.pendingMoveSquad !== null) {
+      this.applyMovePoint(this.pendingMoveSquad, wp.x, wp.y);
+      this.pendingMoveSquad = null;
+      return;
+    }
     this.clickAt(wp.x, wp.y);
   }
 
@@ -419,8 +500,17 @@ export class BattleScene extends Phaser.Scene {
     }
     if (killer && killer.playerControlled) this.playerKills++;
 
+    // 마커 정리
+    this.removeMark(this.surrenderFlags, unit.uid);
+
+    // 보스 사망: 큰 연출 + "적장 격파!" 배너 + 무리 투항 유발
+    if (unit.isBoss) {
+      this.removeMark(this.bossMarks, unit.uid);
+      this.onBossKilled(unit);
+    }
+
     // 조작 중이던 유닛 사망 → 영웅 복귀
-    if (unit === this.controlled && unit !== this.hero && this.hero.alive) {
+    if (unit === this.controlled && unit !== this.hero && this.hero.alive && !this.heroEscaped) {
       this.possessHeroFallback();
     }
     // 정보 선택 대상 사망 → 조작 유닛으로 되돌림
@@ -429,11 +519,188 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
+  private removeMark(map: Map<number, Phaser.GameObjects.Image>, uid: number) {
+    const img = map.get(uid);
+    if (img) {
+      img.destroy();
+      map.delete(uid);
+    }
+  }
+
+  // 적장(보스) 격파 처리: 화면 흔들림 + 파편 + 배너 이벤트 + 무리 투항 판정
+  private onBossKilled(boss: Unit) {
+    const sr = this.squads.find((s) => s.def.id === boss.squadId);
+    if (sr) sr.bossDead = true;
+
+    // 큰 사망 연출
+    this.cameras.main.shake(360, 0.014);
+    this.spawnExplosionFx(boss.x, boss.y, 90);
+    const debris = this.add.particles(boss.x, boss.y, 'fireShard', {
+      speed: { min: 80, max: 260 },
+      angle: { min: 0, max: 360 },
+      gravityY: 120,
+      scale: { start: 1.6, end: 0 },
+      tint: [0xffe070, 0xff8a30, 0xffffff, 0xd23b3b],
+      lifespan: 620,
+      quantity: 30,
+      emitting: false
+    });
+    debris.setDepth(33);
+    debris.explode(30);
+    this.time.delayedCall(700, () => debris.destroy());
+
+    // UIScene가 "적장 격파!" 배너를 띄우도록 이벤트 발신
+    this.events.emit('bossKilled', boss.label);
+
+    // 무리 전원 즉시 1회 투항 판정 (40%)
+    for (const e of this.enemies.slice()) {
+      if (e.squadId !== boss.squadId || e.isBoss) continue;
+      if (e.surrenderState !== 'none') continue;
+      if (Math.random() < SURRENDER.bossDeathInstant) this.beginSurrender(e);
+    }
+  }
+
   private possessHeroFallback() {
     this.controlled = this.hero;
     this.hero.playerControlled = true;
     this.hero.setMoveInput(0, 0);
     this.cameras.main.startFollow(this.hero, true, 0.08, 0.08);
+  }
+
+  // ---------- 투항 시스템 ----------
+  private factionRatio(faction: Faction): number {
+    if (faction === 'ally') return this.allyStart > 0 ? this.allies.length / this.allyStart : 0;
+    return this.enemyStart > 0 ? this.enemies.length / this.enemyStart : 0;
+  }
+
+  // 적 일반병 상시 투항 판정 (Monster.aiTick에서 위임 호출)
+  private maybeSurrender(unit: Unit) {
+    if (unit.surrenderState !== 'none' || unit.isBoss || unit.faction !== 'enemy') return;
+    if (unit.hp / unit.maxHp >= SURRENDER.hpThreshold) return;
+    if (this.factionRatio('enemy') >= SURRENDER.factionRatioThreshold) return;
+    const sr = this.squads.find((s) => s.def.id === unit.squadId);
+    const mult = sr && sr.bossDead ? SURRENDER.bossDeathMultiplier : 1;
+    if (Math.random() < SURRENDER.baseChancePerTick * mult) this.beginSurrender(unit);
+  }
+
+  // 투항 개시: 백기 + 무기 내려놓고 poseMs 후 아군 전환
+  private beginSurrender(unit: Unit) {
+    if (unit.surrenderState !== 'none' || !unit.alive) return;
+    unit.surrenderState = 'surrendering';
+    unit.surrenderReadyAt = this.time.now + SURRENDER.poseMs;
+    unit.stopMotion();
+    // 백기 아이콘
+    const flag = this.add.image(unit.x, unit.y, 'whiteFlag').setDepth(17);
+    this.surrenderFlags.set(unit.uid, flag);
+  }
+
+  // 백기 정지 시간이 끝난 투항병을 아군으로 전환 (update 루프에서 호출)
+  private processSurrenders() {
+    for (const e of this.enemies.slice()) {
+      if (e.surrenderState === 'surrendering' && e.alive && this.time.now >= e.surrenderReadyAt) {
+        this.convertToAlly(e);
+      }
+    }
+  }
+
+  // 투항병 → 아군 편입 (가장 가까운 아군 부대 소속으로)
+  private convertToAlly(unit: Unit) {
+    // enemies에서 제거
+    const i = this.enemies.findIndex((e) => e.uid === unit.uid);
+    if (i >= 0) this.enemies.splice(i, 1);
+    // 물리 그룹 이동
+    this.enemyGroup.remove(unit);
+    this.allyGroup.add(unit);
+    unit.faction = 'ally';
+    unit.surrenderState = 'converted';
+    unit.surrendered = true;
+    unit.stunnedUntil = 0;
+
+    // 가장 가까운 아군 부대 찾기 (생존 유닛 기준)
+    let bestSquad: SquadRuntime | null = null;
+    let bestD = Infinity;
+    for (const sr of this.allySquads()) {
+      for (const m of sr.members) {
+        if (!m.alive || m.escaped) continue;
+        const d = Phaser.Math.Distance.Squared(unit.x, unit.y, m.x, m.y);
+        if (d < bestD) {
+          bestD = d;
+          bestSquad = sr;
+        }
+      }
+    }
+    if (!bestSquad) bestSquad = this.allySquads()[0] ?? null;
+    if (bestSquad) {
+      unit.squadId = bestSquad.def.id;
+      unit.order = bestSquad.order === 'escape' ? 'charge' : bestSquad.order;
+      unit.orderPoint = bestSquad.movePoint;
+      bestSquad.members.push(unit);
+      unit.label = `투항병 ${CLASS_NAME[unit.unitType]}`;
+    }
+
+    // 파랑 계열 재틴트 + 아군 배열 편입
+    unit.applyConvertTint(SURRENDER.convertTint);
+    this.allies.push(unit);
+    this.surrenderedGained++;
+    this.removeMark(this.surrenderFlags, unit.uid);
+    // 투항 연출: 짧은 반짝임
+    this.spawnSpark(unit.x, unit.y - unit.height * 0.3);
+  }
+
+  // ---------- 부대 전술 명령 ----------
+  private setSquadOrder(squadId: number, order: SquadOrder, point?: { x: number; y: number }) {
+    const sr = this.squads.find((s) => s.def.id === squadId && s.def.faction === 'ally');
+    if (!sr) return;
+    sr.order = order;
+    sr.movePoint = order === 'move' ? point ?? sr.movePoint : null;
+    if (order !== 'move') sr.orderFlag.setVisible(false);
+    for (const m of sr.members) {
+      if (!m.alive || m.escaped || m.surrenderState === 'surrendering') continue;
+      m.order = order;
+      m.orderPoint = order === 'move' ? sr.movePoint : null;
+    }
+  }
+
+  // '이동' 지점 지정 (탭/디버그): 깃발 세우고 부대에 이동 명령
+  private applyMovePoint(squadId: number, x: number, y: number) {
+    const sr = this.squads.find((s) => s.def.id === squadId && s.def.faction === 'ally');
+    if (!sr) return;
+    const px = Phaser.Math.Clamp(x, 20, WORLD.width - 20);
+    const py = Phaser.Math.Clamp(y, 20, WORLD.height - 20);
+    this.setSquadOrder(squadId, 'move', { x: px, y: py });
+    sr.orderFlag.setPosition(px, py).setVisible(true);
+  }
+
+  // 탈출: 좌측 가장자리 도달 유닛 제거 (생존 기록)
+  private escapeUnit(unit: Unit) {
+    if (unit.escaped) return;
+    unit.escaped = true;
+    this.escapees.push({ label: unit.label, unitType: unit.unitType, level: unit.level, squadId: unit.squadId });
+    const i = this.allies.findIndex((a) => a.uid === unit.uid);
+    if (i >= 0) this.allies.splice(i, 1);
+    if (unit === this.hero) this.heroEscaped = true;
+    if (unit === this.controlled) {
+      // 조작 유닛 이탈 → 남은 영웅/아군으로 조작 이양
+      if (this.hero.alive && !this.heroEscaped) this.possessHeroFallback();
+      else {
+        const next = this.allies.find((a) => a.alive && !a.escaped);
+        if (next) {
+          this.controlled = next;
+          next.playerControlled = true;
+          this.cameras.main.startFollow(next, true, 0.08, 0.08);
+        }
+      }
+    }
+    this.removeMark(this.bossMarks, unit.uid);
+    this.removeMark(this.surrenderFlags, unit.uid);
+    if (this.selected === unit) {
+      this.selected = this.controlled && this.controlled.alive && !this.controlled.escaped ? this.controlled : this.hero;
+    }
+    // 이탈 연출: 페이드아웃 후 제거
+    const ghost = this.add.image(unit.x, unit.y, unit.texture.key, 0).setDepth(10).setFlipX(unit.flipX);
+    if (unit.convertTint !== null) ghost.setTint(unit.convertTint);
+    this.tweens.add({ targets: ghost, alpha: 0, x: unit.x - 40, duration: 400, onComplete: () => ghost.destroy() });
+    unit.destroy();
   }
 
   private spawnCorpse(unit: Unit) {
@@ -755,8 +1022,8 @@ export class BattleScene extends Phaser.Scene {
 
   // 하단 정보창용: 현재 정보 표시 대상
   getInfoUnit() {
-    const u = this.selected && this.selected.alive ? this.selected : this.controlled;
-    if (!u || !u.alive) return null;
+    const u = this.selected && this.selected.alive && !this.selected.escaped ? this.selected : this.controlled;
+    if (!u || !u.alive || u.escaped) return null;
     const equip: InfoEquipSlot[] = EQUIP_SLOTS.map((slot) => {
       const it = u.equipment[slot];
       return {
@@ -788,6 +1055,8 @@ export class BattleScene extends Phaser.Scene {
       faction: u.faction,
       textureKey: u.texture.key,
       possessed: u === this.controlled,
+      isBoss: u.isBoss,
+      surrendered: u.surrendered,
       equip,
       procDesc
     };
@@ -806,7 +1075,7 @@ export class BattleScene extends Phaser.Scene {
     // 빙의 유닛: 기본은 AI(자동 이동+공격)가 돌고, 유저 입력 중에만 이동 수동 오버라이드
     if (this.controlled && this.controlled.alive) this.controlled.updateAsControlled(delta, this.ctx);
     // 영웅은 비조작 시 매 프레임 반응 (스태거 루프에서는 제외해 중복 틱 방지)
-    if (this.hero.alive && this.controlled !== this.hero) this.hero.aiTick(delta, this.ctx);
+    if (this.hero.alive && !this.heroEscaped && this.controlled !== this.hero) this.hero.aiTick(delta, this.ctx);
 
     const group = this.frameCount % AI.tickGroups;
     for (const a of this.allies) {
@@ -836,7 +1105,7 @@ export class BattleScene extends Phaser.Scene {
 
     // 부대 배너 (선두 생존 유닛 위)
     for (const sr of this.squads) {
-      const lead = sr.members.find((m) => m.alive);
+      const lead = sr.members.find((m) => m.alive && !m.escaped);
       if (lead) {
         sr.banner.setVisible(true);
         sr.banner.setPosition(lead.x, lead.y - lead.height * 0.5 - 8);
@@ -844,6 +1113,11 @@ export class BattleScene extends Phaser.Scene {
         sr.banner.setVisible(false);
       }
     }
+
+    // 전술 마커 (보스 마크 / 투항 백기) 위치 갱신 + 탈출/도착/투항 처리
+    this.updateTacticalMarkers();
+    this.processEscapeAndArrival();
+    this.processSurrenders();
 
     // 투사체
     for (const p of this.projectiles) if (p.active) p.tick(delta, this.ctx);
@@ -856,9 +1130,59 @@ export class BattleScene extends Phaser.Scene {
     this.checkGameEnd();
   }
 
+  // 보스 마크 / 투항 백기를 대상 유닛 머리 위로 갱신
+  private updateTacticalMarkers() {
+    for (const [uid, img] of this.bossMarks) {
+      const u = this.enemies.find((e) => e.uid === uid) ?? this.allies.find((a) => a.uid === uid);
+      if (u && u.alive && !u.escaped) {
+        img.setVisible(true);
+        img.setPosition(u.x, u.y - u.height * 0.5 - 12);
+      } else {
+        img.setVisible(false);
+      }
+    }
+    for (const [uid, img] of this.surrenderFlags) {
+      const u = this.enemies.find((e) => e.uid === uid) ?? this.allies.find((a) => a.uid === uid);
+      if (u && u.alive) {
+        img.setVisible(true);
+        img.setPosition(u.x + 6, u.y - u.height * 0.55);
+      } else {
+        img.setVisible(false);
+      }
+    }
+  }
+
+  // 탈출 유닛 가장자리 제거 + 이동 명령 도착 시 정지 전환
+  private processEscapeAndArrival() {
+    // 탈출: 좌측 가장자리 도달 유닛 제거
+    for (const a of this.allies.slice()) {
+      if (a.order === 'escape' && !a.escaped && a.x <= TACTICS.escapeEdgeX) {
+        this.escapeUnit(a);
+      }
+    }
+    // 이동: 부대 중심이 목표에 근접하면 자동 정지
+    for (const sr of this.allySquads()) {
+      if (sr.order !== 'move' || !sr.movePoint) continue;
+      const living = sr.members.filter((m) => m.alive && !m.escaped);
+      if (living.length === 0) continue;
+      let sx = 0;
+      let sy = 0;
+      for (const m of living) {
+        sx += m.x;
+        sy += m.y;
+      }
+      const cx = sx / living.length;
+      const cy = sy / living.length;
+      if (Phaser.Math.Distance.Between(cx, cy, sr.movePoint.x, sr.movePoint.y) <= TACTICS.arriveSquadDist) {
+        // 도착 → 정지 상태로 전환
+        this.setSquadOrder(sr.def.id, 'hold');
+      }
+    }
+  }
+
   private handleInput() {
     if (Phaser.Input.Keyboard.JustDown(this.keys.tab)) {
-      if (this.hero.alive) {
+      if (this.hero.alive && !this.heroEscaped) {
         this.possess(this.hero);
         this.selected = this.hero;
       }
@@ -875,22 +1199,90 @@ export class BattleScene extends Phaser.Scene {
     }
     if (this.controlled && this.controlled.alive) this.controlled.setMoveInput(vx, vy);
     if (Phaser.Input.Keyboard.JustDown(this.keys.space)) this.requestSkill();
+
+    // 부대 명령 단축키: 1/2 부대 선택, Z/X/C/V/B = 돌격/정지/이동/후퇴/탈출
+    if (Phaser.Input.Keyboard.JustDown(this.squadKeys.sel1)) this.selectSquadTab(0);
+    if (Phaser.Input.Keyboard.JustDown(this.squadKeys.sel2)) this.selectSquadTab(1);
+    for (const [code, key] of [
+      ['Q', this.squadKeys.q],
+      ['W', this.squadKeys.w],
+      ['E', this.squadKeys.e],
+      ['R', this.squadKeys.r],
+      ['T', this.squadKeys.t]
+    ] as [string, Phaser.Input.Keyboard.Key][]) {
+      if (Phaser.Input.Keyboard.JustDown(key)) this.issueSquadOrder(ORDER_KEYS[code]);
+    }
+  }
+
+  // ---------- 부대 명령 공개 API (UIScene / 키보드 공용) ----------
+  selectSquadTab(i: number) {
+    const allies = this.allySquads();
+    if (i < 0 || i >= allies.length) return;
+    this.selectedSquadTab = i;
+  }
+
+  getSelectedSquadTab(): number {
+    return this.selectedSquadTab;
+  }
+
+  isMoveTargeting(): boolean {
+    return this.pendingMoveSquad !== null;
+  }
+
+  // 선택된 부대에 명령 발령. '이동'은 지점 탭 대기 모드로 진입.
+  issueSquadOrder(order: SquadOrder) {
+    const sr = this.allySquads()[this.selectedSquadTab];
+    if (!sr) return;
+    if (order === 'move') {
+      this.pendingMoveSquad = sr.def.id;
+      return;
+    }
+    this.pendingMoveSquad = null;
+    this.setSquadOrder(sr.def.id, order);
+  }
+
+  // UIScene 렌더용 아군 부대 요약
+  getAllySquadInfos() {
+    return this.allySquads().map((sr, i) => ({
+      squadId: sr.def.id,
+      name: sr.def.name,
+      alive: sr.members.filter((m) => m.alive && !m.escaped).length,
+      order: sr.order,
+      banner: sr.def.banner,
+      selected: i === this.selectedSquadTab
+    }));
   }
 
   private checkGameEnd() {
     if (this.gameState !== 'playing') return;
+    const anyEscaping = this.allySquads().some((s) => s.order === 'escape');
     let ended: GameState | null = null;
-    if (!this.hero.alive) ended = 'lose';
+    if (!this.hero.alive && !this.heroEscaped) ended = 'lose';
     else if (this.enemies.length === 0) ended = 'win';
-    else if (this.allies.length <= Math.ceil(this.allyStart * OUTCOME.routRatio)) ended = 'lose';
+    else if (this.allies.length === 0) ended = this.escapees.length > 0 ? 'escape' : 'lose';
+    // 후퇴/탈출 명령 중이 아닐 때만 패주(rout) 판정 — 탈출로 병력이 빠지는 걸 패배로 오인하지 않음
+    else if (!anyEscaping && this.allies.length <= Math.ceil(this.allyStart * OUTCOME.routRatio)) ended = 'lose';
     if (!ended) return;
-    this.gameState = ended;
+    this.finishBattle(ended);
+  }
+
+  private finishBattle(outcome: GameState) {
+    this.gameState = outcome;
     this.result = {
-      win: ended === 'win',
+      win: outcome === 'win',
+      outcome,
       allyDead: this.allyDead,
       enemyDead: this.enemyDead,
       heroKills: this.hero ? this.hero.kills : 0,
-      playerKills: this.playerKills
+      playerKills: this.playerKills,
+      surrenderedGained: this.surrenderedGained,
+      escapees: this.escapees.slice(),
+      squadSurvivors: this.allySquads().map((sr) => ({
+        squadId: sr.def.id,
+        name: sr.def.name,
+        alive: sr.members.filter((m) => m.alive && !m.escaped).length,
+        escaped: sr.members.filter((m) => m.escaped).length
+      }))
     };
     this.cameras.main.stopFollow();
   }
@@ -978,7 +1370,63 @@ export class BattleScene extends Phaser.Scene {
         this.clickAt(wx, wy);
         return this.getInfoUnit();
       },
-      result: () => this.result
+      result: () => this.result,
+      // ---- 부대 명령 / 보스 / 투항 검증 ----
+      squadInfos: () => this.getAllySquadInfos(),
+      // squadId 기준으로 명령 설정. '이동'은 x,y 지점 필요.
+      setSquadOrder: (squadId: number, order: SquadOrder, x?: number, y?: number) => {
+        if (order === 'move' && x !== undefined && y !== undefined) this.applyMovePoint(squadId, x, y);
+        else this.setSquadOrder(squadId, order);
+        const sr = this.squads.find((s) => s.def.id === squadId);
+        return sr ? sr.order : null;
+      },
+      // 부대 생존 멤버 위치 (이동량 검증)
+      squadPositions: (squadId: number) => {
+        const sr = this.squads.find((s) => s.def.id === squadId);
+        if (!sr) return [];
+        return sr.members.filter((m) => m.alive && !m.escaped).map((m) => ({ uid: m.uid, x: m.x, y: m.y }));
+      },
+      squadAlive: (squadId: number) => {
+        const sr = this.squads.find((s) => s.def.id === squadId);
+        return sr ? sr.members.filter((m) => m.alive && !m.escaped).length : 0;
+      },
+      escapedCount: () => this.escapees.length,
+      // 보스 현황: [{squadId, alive, label, hp}]
+      bossInfo: () =>
+        this.enemies
+          .concat(this.allies)
+          .filter((u) => u.isBoss)
+          .map((b) => ({ squadId: b.squadId, alive: b.alive, label: b.label, hp: Math.ceil(b.hp) })),
+      bossAlive: () => this.enemies.filter((e) => e.isBoss && e.alive).length,
+      // 특정 무리 보스 강제 처치 (없으면 -1)
+      killBoss: (squadId: number) => {
+        const b = this.enemies.find((e) => e.isBoss && e.squadId === squadId && e.alive);
+        if (!b) return -1;
+        b.takeDamage(b.hp + 9999, this.ctx, this.hero);
+        return squadId;
+      },
+      killAllBosses: () => {
+        let n = 0;
+        for (const b of this.enemies.slice()) {
+          if (b.isBoss && b.alive) {
+            b.takeDamage(b.hp + 9999, this.ctx, this.hero);
+            n++;
+          }
+        }
+        return n;
+      },
+      surrenderedCount: () => this.surrenderedGained,
+      surrenderingCount: () =>
+        this.enemies.filter((e) => e.surrenderState === 'surrendering').length +
+        this.allies.filter((a) => a.surrenderState === 'surrendering').length,
+      // 특정 적 강제 투항 개시 (연출/전환 검증)
+      forceSurrender: (i: number) => {
+        const e = this.enemies.filter((u) => !u.isBoss && u.surrenderState === 'none')[i];
+        if (!e) return -1;
+        this.beginSurrender(e);
+        return e.uid;
+      },
+      moveTargeting: () => this.pendingMoveSquad !== null
     };
   }
 }

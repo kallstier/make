@@ -67,6 +67,6 @@ export class Hero extends Unit {
   aiTick(dt: number, ctx: BattleContext): void {
     if (!this.alive) return;
     this.updateFlash(ctx);
-    this.combatMelee(dt, ctx, this.stats());
+    this.combat(dt, ctx, this.stats(), false);
   }
 }

@@ -73,6 +73,21 @@ export const ITEMS: Record<string, Item> = {
     procId: 'crushing_staff',
     highlight: true
   },
+  king_maul: {
+    id: 'king_maul',
+    name: '왕의 대몽둥이',
+    slot: 'weapon',
+    mods: { atk: 8 },
+    highlight: true
+  },
+  oni_tetsubo: {
+    id: 'oni_tetsubo',
+    name: '대장 철퇴',
+    slot: 'weapon',
+    mods: { atk: 10 },
+    procId: 'crushing_staff',
+    highlight: true
+  },
 
   // 투구
   iron_helm: { id: 'iron_helm', name: '철투구', slot: 'helmet', mods: { def: 1, hp: 4 } },
@@ -143,6 +158,17 @@ export const DEFAULT_LOADOUT: Record<UnitType, Partial<Record<EquipSlot, string>
     weapon: 'kongo_staff',
     top: 'gob_rag_top',
     bottom: 'gob_rag_bottom'
+  },
+  goblinKing: {
+    weapon: 'king_maul',
+    helmet: 'gold_helm',
+    top: 'leather_top'
+  },
+  oniLord: {
+    weapon: 'oni_tetsubo',
+    helmet: 'iron_helm',
+    top: 'leather_top',
+    bottom: 'leather_bottom'
   }
 };
 
