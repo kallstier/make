@@ -1,293 +1,583 @@
 // ============================================================
-// 절차 생성 스프라이트: Canvas에 픽셀 단위로 그려 Phaser 텍스처로 등록
+// 절차 생성 스프라이트 (픽셀아트 v2)
+// 논리 픽셀 그리드에 손으로 배치 -> 실루엣 자동 외곽선 -> 확대 텍스처화
 // 외부 이미지/오디오 에셋 금지 — 전부 코드로 생성
 // ============================================================
 import Phaser from 'phaser';
 
-export type WeaponType = 'sword' | 'bow' | 'club';
-
-export interface UnitPalette {
-  body: number;
-  bodyDark: number;
-  skin: number;
-  weapon: number;
-}
+const DISPLAY_SCALE = 3; // 논리 픽셀 1개 = 화면 3px
 
 function hex(n: number): string {
-  return '#' + n.toString(16).padStart(6, '0');
+  return '#' + (n & 0xffffff).toString(16).padStart(6, '0');
 }
 
-// 픽셀 그리드를 실제 캔버스에 확대해서 그리는 헬퍼
-class PixelCanvas {
-  ctx: CanvasRenderingContext2D;
-  scale: number;
-  canvas: HTMLCanvasElement;
-
-  constructor(w: number, h: number, scale: number) {
-    this.canvas = document.createElement('canvas');
-    this.canvas.width = w * scale;
-    this.canvas.height = h * scale;
-    this.ctx = this.canvas.getContext('2d')!;
-    this.ctx.imageSmoothingEnabled = false;
-    this.scale = scale;
+// 논리 픽셀 버퍼. null = 투명. 채운 뒤 outline()으로 실루엣 테두리를 만든다.
+class Grid {
+  w: number;
+  h: number;
+  buf: (number | null)[];
+  constructor(w: number, h: number) {
+    this.w = w;
+    this.h = h;
+    this.buf = new Array(w * h).fill(null);
   }
-
-  px(x: number, y: number, color: string) {
-    this.ctx.fillStyle = color;
-    this.ctx.fillRect(x * this.scale, y * this.scale, this.scale, this.scale);
+  set(x: number, y: number, c: number) {
+    x = Math.round(x);
+    y = Math.round(y);
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+    this.buf[y * this.w + x] = c;
   }
-
-  rect(x: number, y: number, w: number, h: number, color: string) {
-    this.ctx.fillStyle = color;
-    this.ctx.fillRect(x * this.scale, y * this.scale, w * this.scale, h * this.scale);
+  get(x: number, y: number): number | null {
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return null;
+    return this.buf[y * this.w + x];
   }
-}
-
-// 유닛 한 프레임을 그린다. gridSize x gridSize 픽셀 논리 해상도.
-function drawUnitFrame(
-  pc: PixelCanvas,
-  grid: number,
-  pal: UnitPalette,
-  weapon: WeaponType,
-  legPhase: number // 0 or 1
-) {
-  const cx = Math.floor(grid / 2);
-  const skin = hex(pal.skin);
-  const body = hex(pal.body);
-  const dark = hex(pal.bodyDark);
-  const wpn = hex(pal.weapon);
-  const outline = 'rgba(0,0,0,0.55)';
-
-  // 크기 비율 (grid 기준). 치비: 큰 머리 + 작은 몸.
-  const headR = Math.max(2, Math.round(grid * 0.20));
-  const headCY = Math.round(grid * 0.32);
-  const bodyTop = headCY + headR;
-  const bodyBot = Math.round(grid * 0.82);
-  const bodyW = Math.max(3, Math.round(grid * 0.30));
-
-  // 그림자
-  pc.ctx.fillStyle = 'rgba(0,0,0,0.22)';
-  pc.ctx.beginPath();
-  pc.ctx.ellipse(
-    cx * pc.scale,
-    (grid - 1) * pc.scale,
-    bodyW * pc.scale,
-    Math.max(1, grid * 0.09) * pc.scale,
-    0,
-    0,
-    Math.PI * 2
-  );
-  pc.ctx.fill();
-
-  // 머리 (외곽 + 채움)
-  for (let y = headCY - headR; y <= headCY + headR; y++) {
-    for (let x = cx - headR; x <= cx + headR; x++) {
-      const dx = x - cx;
-      const dy = y - headCY;
-      if (dx * dx + dy * dy <= headR * headR) {
-        pc.px(x, y, skin);
+  rect(x: number, y: number, w: number, h: number, c: number) {
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) this.set(x + i, y + j, c);
+  }
+  disc(cx: number, cy: number, r: number, c: number) {
+    for (let y = Math.floor(cy - r); y <= cy + r; y++)
+      for (let x = Math.floor(cx - r); x <= cx + r; x++) {
+        const dx = x - cx;
+        const dy = y - cy;
+        if (dx * dx + dy * dy <= r * r + 0.2) this.set(x, y, c);
+      }
+  }
+  vline(x: number, y0: number, y1: number, c: number) {
+    for (let y = y0; y <= y1; y++) this.set(x, y, c);
+  }
+  line(x0: number, y0: number, x1: number, y1: number, c: number) {
+    x0 = Math.round(x0);
+    y0 = Math.round(y0);
+    x1 = Math.round(x1);
+    y1 = Math.round(y1);
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    for (;;) {
+      this.set(x0, y0, c);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) {
+        err -= dy;
+        x0 += sx;
+      }
+      if (e2 < dx) {
+        err += dx;
+        y0 += sy;
       }
     }
   }
-  // 눈 2픽셀
-  pc.px(cx - Math.max(1, Math.round(headR * 0.4)), headCY, '#222');
-  pc.px(cx + Math.max(1, Math.round(headR * 0.4)) - 1, headCY, '#222');
+  // 실루엣 자동 외곽선: 빈 칸 중 채워진 칸과 4방향 인접이면 outline 색으로.
+  outlined(outline: number): (number | null)[] {
+    const out = this.buf.slice();
+    const isFill = (x: number, y: number) => {
+      const v = this.get(x, y);
+      return v !== null && v !== outline;
+    };
+    for (let y = 0; y < this.h; y++)
+      for (let x = 0; x < this.w; x++) {
+        if (this.buf[y * this.w + x] !== null) continue;
+        if (isFill(x - 1, y) || isFill(x + 1, y) || isFill(x, y - 1) || isFill(x, y + 1)) {
+          out[y * this.w + x] = outline;
+        }
+      }
+    return out;
+  }
+}
 
-  // 몸통
-  pc.rect(cx - Math.floor(bodyW / 2), bodyTop, bodyW, bodyBot - bodyTop, body);
-  // 몸통 음영 (오른쪽)
-  pc.rect(cx + Math.floor(bodyW / 2) - 1, bodyTop, 1, bodyBot - bodyTop, dark);
+export interface UnitPalette {
+  outline: number;
+  skin: number;
+  skinShade: number;
+  body: number;
+  bodyShade: number;
+  gear: number; // 투구/후드/모자
+  gearShade: number;
+  metal: number; // 무기 금속/밝은 부분
+  metalDark: number; // 무기 손잡이/어두운 부분
+  accent: number; // 방패/망토 등 강조
+  accentShade: number;
+}
 
-  // 다리 2개 (걷기 프레임: 위치 변경)
-  const legY = bodyBot;
-  const legLen = Math.max(1, Math.round(grid * 0.14));
-  const legOffset = legPhase === 0 ? 0 : 1;
-  pc.rect(cx - Math.floor(bodyW / 2), legY - legOffset, 1, legLen, dark);
-  pc.rect(cx + Math.floor(bodyW / 2) - 1, legY + legOffset, 1, legLen, dark);
+export type UnitKind =
+  | 'melee'
+  | 'ranged'
+  | 'spear'
+  | 'hero'
+  | 'goblin'
+  | 'goblinArcher'
+  | 'oni';
 
-  // 무기 (오른손, 몸 오른쪽)
-  const armY = bodyTop + Math.round((bodyBot - bodyTop) * 0.25);
-  const wx = cx + Math.floor(bodyW / 2);
-  if (weapon === 'sword') {
-    // 세로 검
-    const bladeLen = Math.round(grid * 0.34);
-    pc.rect(wx + 1, armY - bladeLen + 2, 1, bladeLen, wpn);
-    pc.px(wx + 1, armY + 1, '#8a6a2a'); // 손잡이
-    pc.px(wx, armY, '#8a6a2a');
-  } else if (weapon === 'bow') {
-    // 활 (곡선 근사)
-    const bx = wx + 1;
-    for (let k = -2; k <= 2; k++) {
-      const yy = armY + k;
-      const off = 2 - Math.abs(k);
-      pc.px(bx + off, yy, hex(0x9a6b2a));
-    }
-    // 시위
-    pc.rect(bx, armY - 2, 1, 5, '#eee');
-  } else {
-    // club / 몽둥이
-    const clubLen = Math.round(grid * 0.26);
-    pc.rect(wx + 1, armY - clubLen + 2, 2, clubLen, hex(0x7a5a2a));
-    pc.rect(wx, armY - clubLen + 1, 3, 2, dark);
+interface UnitShape {
+  gw: number;
+  gh: number;
+}
+
+const SHAPES: Record<UnitKind, UnitShape> = {
+  melee: { gw: 16, gh: 16 },
+  ranged: { gw: 16, gh: 16 },
+  spear: { gw: 16, gh: 18 },
+  hero: { gw: 20, gh: 20 },
+  goblin: { gw: 16, gh: 15 },
+  goblinArcher: { gw: 16, gh: 15 },
+  oni: { gw: 24, gh: 24 }
+};
+
+// 병종별 팔레트 (손으로 고른 상수)
+export const UNIT_PALETTES: Record<UnitKind, UnitPalette> = {
+  melee: {
+    outline: 0x151a2a,
+    skin: 0xf0c090,
+    skinShade: 0xcf9968,
+    body: 0x3f74e0,
+    bodyShade: 0x274ea0,
+    gear: 0xb9c6da,
+    gearShade: 0x7c8aa4,
+    metal: 0xe6edf7,
+    metalDark: 0x8a6a34,
+    accent: 0xd9b64a,
+    accentShade: 0x9a7c26
+  },
+  ranged: {
+    outline: 0x151a2a,
+    skin: 0xf0c090,
+    skinShade: 0xcf9968,
+    body: 0x2f8a6a,
+    bodyShade: 0x1d5c46,
+    gear: 0x2a5a9a,
+    gearShade: 0x1b3c6c,
+    metal: 0xd9b06a,
+    metalDark: 0x7a5326,
+    accent: 0xe8e0c8,
+    accentShade: 0xb0a888
+  },
+  spear: {
+    outline: 0x151a2a,
+    skin: 0xf0c090,
+    skinShade: 0xcf9968,
+    body: 0x4a6fd0,
+    bodyShade: 0x2f4a9a,
+    gear: 0xcf9048,
+    gearShade: 0x8f5f24,
+    metal: 0xe6edf7,
+    metalDark: 0x7a5326,
+    accent: 0xc0c0cc,
+    accentShade: 0x88889a
+  },
+  hero: {
+    outline: 0x2a1e08,
+    skin: 0xf6cf9a,
+    skinShade: 0xd39f68,
+    body: 0xf2c53b,
+    bodyShade: 0xc2901a,
+    gear: 0xffe97a,
+    gearShade: 0xc9a52a,
+    metal: 0xfbffff,
+    metalDark: 0x9a7420,
+    accent: 0xc0392a, // 망토
+    accentShade: 0x82231a
+  },
+  goblin: {
+    outline: 0x101c10,
+    skin: 0x6bbf4a,
+    skinShade: 0x458a2e,
+    body: 0x8a6a3a,
+    bodyShade: 0x5c4522,
+    gear: 0x6a5230,
+    gearShade: 0x463618,
+    metal: 0x9a7a4a,
+    metalDark: 0x5a4426,
+    accent: 0x7a3a2a,
+    accentShade: 0x511f16
+  },
+  goblinArcher: {
+    outline: 0x101c10,
+    skin: 0x6bbf4a,
+    skinShade: 0x458a2e,
+    body: 0x555f38,
+    bodyShade: 0x353c22,
+    gear: 0x3a4a2a,
+    gearShade: 0x24301a,
+    metal: 0xba9058,
+    metalDark: 0x6a4d28,
+    accent: 0xd8cba0,
+    accentShade: 0x9a8f6a
+  },
+  oni: {
+    outline: 0x2a0d0d,
+    skin: 0xdb4a3a,
+    skinShade: 0xa02a20,
+    body: 0x3a3550,
+    bodyShade: 0x241f36,
+    gear: 0xf2d64a,
+    gearShade: 0xb89a1e,
+    metal: 0xffe070,
+    metalDark: 0xb0801a,
+    accent: 0x101018,
+    accentShade: 0x000000
+  }
+};
+
+// ---- 프레임 종류 ----
+// 0: 걷기A, 1: 걷기B, 2: 공격, 3: 시체
+function legOffsets(frame: number): [number, number] {
+  if (frame === 0) return [0, 1];
+  if (frame === 1) return [1, 0];
+  return [0, 0]; // 공격 프레임은 정지 자세
+}
+
+// 공용 다리 그리기 (facing right 기준)
+function drawLegs(g: Grid, cx: number, groundY: number, bodyBot: number, P: UnitPalette, frame: number) {
+  const [lo, ro] = legOffsets(frame);
+  const legLen = groundY - bodyBot;
+  const lx = cx - 2;
+  const rx = cx + 1;
+  g.rect(lx, bodyBot + lo, 2, legLen - lo, P.bodyShade);
+  g.rect(rx, bodyBot + ro, 2, legLen - ro, P.body);
+  // 발
+  g.rect(lx - 1, groundY, 3, 1, P.gearShade);
+  g.rect(rx, groundY, 3, 1, P.gearShade);
+}
+
+function drawHumanoid(g: Grid, kind: UnitKind, P: UnitPalette, frame: number) {
+  const { gw, gh } = SHAPES[kind];
+  const cx = Math.floor(gw / 2);
+  const groundY = gh - 1;
+
+  if (frame === 3) {
+    drawCorpse(g, kind, P);
+    return;
   }
 
-  // 팔 (몸 색)
-  pc.px(wx, armY, skin);
+  const attack = frame === 2;
+
+  // 헤드/보디 세팅 (병종별)
+  if (kind === 'oni') {
+    drawOni(g, P, frame, cx, groundY, attack);
+    return;
+  }
+  if (kind === 'hero') {
+    drawHero(g, P, frame, cx, groundY, attack);
+    return;
+  }
+  if (kind === 'goblin' || kind === 'goblinArcher') {
+    drawGoblin(g, kind, P, frame, cx, groundY, attack);
+    return;
+  }
+
+  // ---- 일반 병사 (검병/궁병/창병) 16x16~18 ----
+  const headCY = kind === 'spear' ? 5 : 4;
+  const headR = 3;
+  const bodyTop = headCY + headR;
+  const bodyBot = groundY - 3;
+  const bodyW = 5;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  drawLegs(g, cx, groundY, bodyBot, P, frame);
+
+  // 몸통(갑옷)
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.body);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.bodyShade); // 오른쪽 음영
+  g.rect(bodyX, bodyTop, bodyW, 1, P.body); // 어깨선
+
+  // 머리
+  g.disc(cx, headCY, headR, P.skin);
+  g.set(cx + headR - 1, headCY + 1, P.skinShade);
+  g.set(cx + 1, headCY, P.outline); // 눈
+
+  // 헤드기어
+  if (kind === 'melee') {
+    // 투구 (윗머리 덮고 볏)
+    g.disc(cx, headCY - 1, headR, P.gear);
+    g.rect(cx - headR, headCY, headR * 2 + 1, 1, P.gearShade); // 챙
+    g.set(cx, headCY - headR - 1, P.accent); // 볏
+    g.set(cx, headCY - headR - 2, P.accent);
+    // 얼굴 노출
+    g.rect(cx - 1, headCY + 1, 3, 2, P.skin);
+    g.set(cx + 1, headCY + 1, P.outline);
+  } else if (kind === 'ranged') {
+    // 후드 (뾰족)
+    g.disc(cx, headCY, headR, P.gear);
+    g.set(cx - 1, headCY - headR - 1, P.gear);
+    g.set(cx, headCY - headR - 1, P.gearShade);
+    g.rect(cx - 1, headCY, 3, 3, P.skin); // 얼굴
+    g.set(cx + 1, headCY + 1, P.outline);
+  } else if (kind === 'spear') {
+    // 원뿔 모자 (삼각)
+    for (let i = 0; i <= headR + 1; i++) {
+      g.rect(cx - i, headCY - headR - 1 + i, i * 2 + 1, 1, i % 2 === 0 ? P.gear : P.gearShade);
+    }
+    g.rect(cx - 1, headCY, 3, 2, P.skin);
+    g.set(cx + 1, headCY, P.outline);
+  }
+
+  // 무기 & 방패
+  const armY = bodyTop + 1;
+  if (kind === 'melee') {
+    // 방패 (전면/왼쪽 근접팔)
+    g.rect(cx - 4, armY, 2, 5, P.accent);
+    g.vline(cx - 4, armY, armY + 4, P.accentShade);
+    g.set(cx - 3, armY + 2, P.metal); // 방패 보스
+    // 검
+    if (attack) {
+      g.line(cx + 2, armY, cx + 6, armY + 4, P.metal);
+      g.set(cx + 6, armY + 4, P.metal);
+      g.set(cx + 2, armY, P.metalDark);
+    } else {
+      g.vline(cx + 3, headCY - 2, armY + 1, P.metal);
+      g.rect(cx + 2, armY + 1, 3, 1, P.metalDark); // 가드
+      g.set(cx + 3, armY + 2, P.metalDark); // 손잡이
+    }
+  } else if (kind === 'ranged') {
+    // 활 (전면 호)
+    const bx = cx + 3;
+    g.line(bx, armY - 2, bx + 1, armY, P.metalDark);
+    g.line(bx + 1, armY, bx, armY + 3, P.metalDark);
+    g.vline(bx - 1, armY - 2, armY + 3, P.accent); // 시위
+    if (attack) g.set(bx - 3, armY, P.metal); // 화살 노킹
+  } else if (kind === 'spear') {
+    // 긴 창 (대각)
+    if (attack) {
+      g.line(cx + 1, armY + 1, cx + 6, armY - 1, P.metalDark);
+      g.set(cx + 6, armY - 1, P.metal);
+      g.set(cx + 7, armY - 2, P.metal);
+    } else {
+      g.line(cx - 2, groundY - 1, cx + 4, headCY - 4, P.metalDark);
+      g.set(cx + 4, headCY - 4, P.metal);
+      g.set(cx + 5, headCY - 5, P.metal); // 창끝
+    }
+  }
 }
 
-export interface GenUnitOptions {
-  key: string;
-  grid: number; // 논리 픽셀 크기 (예: 16, 20, 24, 32)
-  scale: number; // 확대 배율 (텍스처 실제 픽셀 = grid*scale)
-  pal: UnitPalette;
-  weapon: WeaponType;
+function drawHero(g: Grid, P: UnitPalette, frame: number, cx: number, groundY: number, attack: boolean) {
+  const headCY = 5;
+  const headR = 3;
+  const bodyTop = headCY + headR;
+  const bodyBot = groundY - 4;
+  const bodyW = 6;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  // 망토 (뒤 — 왼쪽)
+  g.rect(bodyX - 2, bodyTop, 3, bodyBot - bodyTop + 3, P.accent);
+  g.vline(bodyX - 2, bodyTop, bodyBot + 1, P.accentShade);
+  g.set(bodyX - 1, bodyBot + 2, P.accentShade);
+
+  drawLegs(g, cx, groundY, bodyBot, P, frame);
+
+  // 몸통(황금 갑옷)
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.body);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.bodyShade);
+  g.rect(bodyX + 1, bodyTop + 1, 2, 2, P.gear); // 흉갑 광택
+
+  // 머리 + 투구 + 깃털
+  g.disc(cx, headCY, headR, P.skin);
+  g.disc(cx, headCY - 1, headR, P.gear);
+  g.rect(cx - headR, headCY, headR * 2 + 1, 1, P.gearShade);
+  g.rect(cx - 1, headCY + 1, 3, 2, P.skin);
+  g.set(cx + 1, headCY + 1, P.outline);
+  // 깃털 볏
+  g.set(cx, headCY - headR - 1, P.accent);
+  g.set(cx, headCY - headR - 2, P.accent);
+  g.set(cx - 1, headCY - headR - 1, P.accentShade);
+
+  // 빛나는 검 (오른손)
+  const armY = bodyTop + 1;
+  if (attack) {
+    g.line(cx + 2, armY - 1, cx + 8, armY + 5, P.metal);
+    g.line(cx + 2, armY, cx + 7, armY + 5, 0xffffff);
+    g.set(cx + 2, armY, P.metalDark);
+  } else {
+    g.vline(cx + 4, headCY - 4, armY + 1, P.metal);
+    g.vline(cx + 3, headCY - 4, armY, 0xffffff); // 검광 하이라이트
+    g.rect(cx + 3, armY + 1, 3, 1, P.metalDark);
+    g.set(cx + 4, armY + 2, P.metalDark);
+  }
 }
 
-// 걷기 2프레임 스프라이트시트 생성 -> 텍스처 키 등록 (frame 0,1)
-export function genUnit(scene: Phaser.Scene, opts: GenUnitOptions) {
-  if (scene.textures.exists(opts.key)) return;
-  const { grid, scale } = opts;
-  // 두 프레임을 가로로 배치
+function drawGoblin(g: Grid, kind: UnitKind, P: UnitPalette, frame: number, cx: number, groundY: number, attack: boolean) {
+  // 웅크린 자세: 머리 앞으로, 몸통 낮게
+  const headCY = 4;
+  const headR = 3;
+  const bodyTop = headCY + headR - 1;
+  const bodyBot = groundY - 2;
+  const bodyW = 5;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  drawLegs(g, cx, groundY, bodyBot, P, frame);
+
+  // 몸통 (누더기)
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.body);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.bodyShade);
+
+  // 큰 귀 + 머리
+  g.disc(cx, headCY, headR, P.skin);
+  g.set(cx - headR - 1, headCY, P.skin); // 왼귀
+  g.set(cx - headR - 2, headCY - 1, P.skinShade);
+  g.set(cx + headR + 1, headCY, P.skin); // 오른귀
+  g.set(cx + headR + 2, headCY - 1, P.skinShade);
+  g.set(cx + 1, headCY, P.outline); // 눈
+  g.set(cx + 2, headCY + 1, P.skinShade); // 코/입
+
+  if (kind === 'goblinArcher') {
+    // 두건
+    g.disc(cx, headCY - 1, headR, P.gear);
+    g.rect(cx - 1, headCY, 3, 2, P.skin);
+    g.set(cx + 1, headCY, P.outline);
+    // 활
+    const bx = cx + 3;
+    g.line(bx, headCY, bx + 1, headCY + 2, P.metalDark);
+    g.line(bx + 1, headCY + 2, bx, headCY + 5, P.metalDark);
+    g.vline(bx - 1, headCY, headCY + 5, P.accent);
+    if (attack) g.set(bx - 3, headCY + 2, P.metal);
+  } else {
+    // 몽둥이
+    const armY = bodyTop + 1;
+    if (attack) {
+      g.line(cx + 1, armY, cx + 6, armY - 3, P.metalDark);
+      g.rect(cx + 5, armY - 4, 2, 2, P.metal); // 뭉툭한 머리
+    } else {
+      g.line(cx + 2, armY + 2, cx + 5, headCY - 3, P.metalDark);
+      g.rect(cx + 4, headCY - 4, 2, 2, P.metal);
+    }
+  }
+}
+
+function drawOni(g: Grid, P: UnitPalette, frame: number, cx: number, groundY: number, attack: boolean) {
+  // 24x24 붉은 거구
+  const headCY = 6;
+  const headR = 4;
+  const bodyTop = headCY + headR - 1;
+  const bodyBot = groundY - 5;
+  const bodyW = 10;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  // 다리 (굵게)
+  const [lo, ro] = legOffsets(frame);
+  const legLen = groundY - bodyBot;
+  g.rect(cx - 4, bodyBot + lo, 3, legLen - lo, P.skinShade);
+  g.rect(cx + 1, bodyBot + ro, 3, legLen - ro, P.skin);
+  g.rect(cx - 5, groundY, 4, 1, P.outline);
+  g.rect(cx + 1, groundY, 4, 1, P.outline);
+
+  // 몸통 (근육 + 허리 두른 천)
+  g.disc(cx, bodyTop + 4, 6, P.skin); // 가슴 근육 덩어리
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.skin);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.skinShade);
+  g.rect(bodyX, bodyBot - 3, bodyW, 3, P.body); // 허리천
+  g.vline(bodyX + bodyW - 1, bodyBot - 3, bodyBot - 1, P.bodyShade);
+
+  // 머리
+  g.disc(cx, headCY, headR, P.skin);
+  g.set(cx + headR - 1, headCY + 1, P.skinShade);
+  g.rect(cx - 2, headCY, 1, 1, P.gear); // 눈(금빛, 사나움)
+  g.rect(cx + 1, headCY, 1, 1, P.gear);
+  g.rect(cx - 1, headCY + 2, 3, 1, P.accent); // 입/이빨
+  g.set(cx - 1, headCY + 2, P.metal);
+  g.set(cx + 1, headCY + 2, P.metal);
+  // 뿔 두 개
+  g.line(cx - 3, headCY - headR, cx - 4, headCY - headR - 3, P.gear);
+  g.line(cx + 3, headCY - headR, cx + 4, headCY - headR - 3, P.gear);
+  g.set(cx - 4, headCY - headR - 3, P.metal);
+  g.set(cx + 4, headCY - headR - 3, P.metal);
+
+  // 금강저(가시 금봉) — 오른손
+  const armY = bodyTop + 2;
+  if (attack) {
+    g.line(cx + 3, armY, cx + 9, armY - 6, P.metalDark);
+    g.rect(cx + 7, armY - 9, 3, 4, P.metal);
+    g.set(cx + 6, armY - 9, P.gear);
+    g.set(cx + 10, armY - 6, P.gear);
+  } else {
+    g.line(cx + 4, bodyBot, cx + 7, headCY - 5, P.metalDark);
+    g.rect(cx + 6, headCY - 8, 3, 4, P.metal);
+    g.set(cx + 5, headCY - 8, P.gear);
+    g.set(cx + 9, headCY - 5, P.gear);
+  }
+}
+
+function drawCorpse(g: Grid, kind: UnitKind, P: UnitPalette) {
+  const { gw, gh } = SHAPES[kind];
+  const cx = Math.floor(gw / 2);
+  const y = gh - 2;
+  const len = kind === 'oni' ? 9 : kind === 'hero' ? 7 : 5;
+  // 쓰러진 몸통
+  g.rect(cx - len, y - 1, len * 2, 2, P.body);
+  g.rect(cx - len, y, len * 2, 1, P.bodyShade);
+  // 머리
+  g.disc(cx - len, y, 2, P.skin);
+  // 흩어진 무기
+  g.line(cx, y - 2, cx + len, y - 2, P.metalDark);
+}
+
+// ---- 텍스처 등록 ----
+export function genUnit(scene: Phaser.Scene, key: string, kind: UnitKind, tint = 0xffffff) {
+  if (scene.textures.exists(key)) return;
+  const { gw, gh } = SHAPES[kind];
+  const P = applyTint(UNIT_PALETTES[kind], tint);
+  const frames = 4;
+  const fw = gw * DISPLAY_SCALE;
+  const fh = gh * DISPLAY_SCALE;
+
   const sheet = document.createElement('canvas');
-  sheet.width = grid * scale * 2;
-  sheet.height = grid * scale;
+  sheet.width = fw * frames;
+  sheet.height = fh;
   const sctx = sheet.getContext('2d')!;
   sctx.imageSmoothingEnabled = false;
 
-  const fw = grid * scale;
-  const fh = grid * scale;
-  for (let f = 0; f < 2; f++) {
-    const pc = new PixelCanvas(grid, grid, scale);
-    drawUnitFrame(pc, grid, opts.pal, opts.weapon, f);
-    sctx.drawImage(pc.canvas, f * fw, 0);
-  }
-
-  // 캔버스를 텍스처로 등록하고 두 프레임을 수동으로 추가
-  const tex = scene.textures.addCanvas(opts.key, sheet)!;
-  tex.add(0, 0, 0, 0, fw, fh);
-  tex.add(1, 0, fw, 0, fw, fh);
-}
-
-// ============================================================
-// 성채 스프라이트
-// ============================================================
-export function genCastle(scene: Phaser.Scene, key: string, flagColor: number) {
-  if (scene.textures.exists(key)) return;
-  const grid = 48;
-  const scale = 2;
-  const pc = new PixelCanvas(grid, grid, scale);
-  const stone = hex(0x8f8f9a);
-  const stoneDark = hex(0x5f5f6a);
-  const stoneLight = hex(0xb0b0ba);
-
-  // 본체
-  pc.rect(8, 18, 32, 26, stone);
-  pc.rect(8, 18, 32, 2, stoneLight);
-  pc.rect(38, 18, 2, 26, stoneDark);
-  // 성문
-  pc.rect(20, 32, 8, 12, hex(0x3a2a1a));
-  pc.rect(21, 30, 6, 3, stoneDark);
-  // 흉벽 (톱니)
-  for (let i = 0; i < 8; i++) {
-    pc.rect(8 + i * 4, 14, 2, 4, stone);
-  }
-  // 양쪽 탑
-  pc.rect(4, 12, 8, 32, stone);
-  pc.rect(36, 12, 8, 32, stone);
-  pc.rect(4, 12, 8, 2, stoneLight);
-  pc.rect(36, 12, 8, 2, stoneLight);
-  for (let i = 0; i < 2; i++) {
-    pc.rect(4 + i * 4, 9, 2, 3, stone);
-    pc.rect(36 + i * 4, 9, 2, 3, stone);
-  }
-  // 창문
-  pc.rect(6, 20, 3, 3, hex(0x2a2a1a));
-  pc.rect(39, 20, 3, 3, hex(0x2a2a1a));
-
-  scene.textures.addCanvas(key, pc.canvas);
-}
-
-// ============================================================
-// 깃발
-// ============================================================
-export function genFlag(scene: Phaser.Scene, key: string, color: number) {
-  if (scene.textures.exists(key)) return;
-  const grid = 16;
-  const scale = 2;
-  const pc = new PixelCanvas(grid, grid, scale);
-  // 깃대
-  pc.rect(3, 1, 1, 15, hex(0x6a4a2a));
-  // 천
-  pc.ctx.fillStyle = hex(color);
-  for (let y = 2; y <= 8; y++) {
-    const w = 9 - Math.abs(5 - y);
-    pc.rect(4, y, w, 1, hex(color));
-  }
-  scene.textures.addCanvas(key, pc.canvas);
-}
-
-// ============================================================
-// 데코: 나무, 바위
-// ============================================================
-export function genTree(scene: Phaser.Scene, key: string) {
-  if (scene.textures.exists(key)) return;
-  const grid = 20;
-  const scale = 2;
-  const pc = new PixelCanvas(grid, grid, scale);
-  // 그림자
-  pc.ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  pc.ctx.fillRect(6 * scale, 18 * scale, 8 * scale, 2 * scale);
-  // 줄기
-  pc.rect(9, 13, 2, 6, hex(0x5a3a1a));
-  // 잎 (원형 3덩이)
-  const leaf = hex(0x2f7a2f);
-  const leafDark = hex(0x1f5a1f);
-  const blobs = [
-    [10, 8, 5],
-    [7, 10, 3],
-    [13, 10, 3]
-  ];
-  for (const [bx, by, r] of blobs) {
-    for (let y = by - r; y <= by + r; y++) {
-      for (let x = bx - r; x <= bx + r; x++) {
-        const dx = x - bx;
-        const dy = y - by;
-        if (dx * dx + dy * dy <= r * r) {
-          pc.px(x, y, y > by ? leafDark : leaf);
-        }
+  for (let f = 0; f < frames; f++) {
+    const g = new Grid(gw, gh);
+    drawHumanoid(g, kind, P, f);
+    const out = g.outlined(P.outline);
+    for (let y = 0; y < gh; y++)
+      for (let x = 0; x < gw; x++) {
+        const c = out[y * gw + x];
+        if (c === null) continue;
+        sctx.fillStyle = hex(c);
+        sctx.fillRect(f * fw + x * DISPLAY_SCALE, y * DISPLAY_SCALE, DISPLAY_SCALE, DISPLAY_SCALE);
       }
-    }
   }
-  scene.textures.addCanvas(key, pc.canvas);
+
+  const tex = scene.textures.addCanvas(key, sheet)!;
+  for (let f = 0; f < frames; f++) tex.add(f, 0, f * fw, 0, fw, fh);
 }
 
-export function genRock(scene: Phaser.Scene, key: string) {
+// 부대 소속 미세 색조 (원색과 곱연산)
+function applyTint(P: UnitPalette, tint: number): UnitPalette {
+  if (tint === 0xffffff) return P;
+  const tr = ((tint >> 16) & 0xff) / 255;
+  const tg = ((tint >> 8) & 0xff) / 255;
+  const tb = (tint & 0xff) / 255;
+  const mul = (c: number) => {
+    const r = Math.min(255, Math.round(((c >> 16) & 0xff) * (0.55 + tr * 0.45)));
+    const gg = Math.min(255, Math.round(((c >> 8) & 0xff) * (0.55 + tg * 0.45)));
+    const b = Math.min(255, Math.round((c & 0xff) * (0.55 + tb * 0.45)));
+    return (r << 16) | (gg << 8) | b;
+  };
+  const out = { ...P };
+  out.body = mul(P.body);
+  out.bodyShade = mul(P.bodyShade);
+  return out;
+}
+
+// 프레임 상수 (Unit에서 참조)
+export const FRAME = { WALK_A: 0, WALK_B: 1, ATTACK: 2, CORPSE: 3 };
+
+// ============================================================
+// 부대 배너 (선두 유닛 위 작은 깃발)
+// ============================================================
+export function genBanner(scene: Phaser.Scene, key: string, color: number) {
   if (scene.textures.exists(key)) return;
-  const grid = 16;
-  const scale = 2;
-  const pc = new PixelCanvas(grid, grid, scale);
-  pc.ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  pc.ctx.fillRect(3 * scale, 12 * scale, 10 * scale, 2 * scale);
-  const rock = hex(0x8a8a8a);
-  const rockDark = hex(0x5a5a5a);
-  const rockLight = hex(0xaaaaaa);
-  const blobs = [
-    [8, 9, 4],
-    [5, 11, 2]
-  ];
-  for (const [bx, by, r] of blobs) {
-    for (let y = by - r; y <= by + r; y++) {
-      for (let x = bx - r; x <= bx + r; x++) {
-        const dx = x - bx;
-        const dy = y - by;
-        if (dx * dx + dy * dy <= r * r) {
-          pc.px(x, y, y < by ? rockLight : rock);
-        }
-      }
-    }
+  const g = new Grid(12, 14);
+  g.vline(2, 0, 13, 0x5a4028); // 깃대
+  for (let y = 1; y <= 7; y++) {
+    const w = 8 - Math.abs(4 - y);
+    g.rect(3, y, w, 1, color);
   }
-  pc.rect(6, 10, 2, 1, rockDark);
-  scene.textures.addCanvas(key, pc.canvas);
+  g.rect(3, 3, 3, 3, 0xffffff); // 문양
+  const out = g.outlined(0x101010);
+  blit(scene, key, g, out, 2);
 }
 
 // ============================================================
@@ -295,15 +585,75 @@ export function genRock(scene: Phaser.Scene, key: string) {
 // ============================================================
 export function genArrow(scene: Phaser.Scene, key: string) {
   if (scene.textures.exists(key)) return;
-  const grid = 12;
-  const scale = 2;
-  const pc = new PixelCanvas(grid, grid, scale);
-  const y = 5;
-  pc.rect(1, y, 8, 2, hex(0x6a4a2a)); // 대
-  pc.rect(9, y - 1, 2, 4, hex(0xcccccc)); // 촉
-  pc.px(0, y - 1, hex(0xdddddd)); // 깃
-  pc.px(0, y + 2, hex(0xdddddd));
-  scene.textures.addCanvas(key, pc.canvas);
+  const g = new Grid(12, 6);
+  g.rect(1, 2, 8, 1, 0x6a4a2a); // 대
+  g.rect(9, 1, 2, 3, 0xd8d8d8); // 촉
+  g.set(0, 1, 0xdddddd); // 깃
+  g.set(0, 3, 0xdddddd);
+  const out = g.outlined(0x1a1208);
+  blit(scene, key, g, out, 2);
+}
+
+// ============================================================
+// 타격 스파크
+// ============================================================
+export function genSpark(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(9, 9);
+  const c = 4;
+  g.set(c, c, 0xffffff);
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]] as [number, number][]) {
+    g.set(c + dx, c + dy, 0xffe9a0);
+    g.set(c + dx * 2, c + dy * 2, 0xffb84a);
+  }
+  blit(scene, key, g, g.buf, 3);
+}
+
+// ============================================================
+// 조작(빙의) 선택 링 (납작한 타원)
+// ============================================================
+export function genSelectRing(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const w = 96;
+  const h = 44;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  const cx = w / 2;
+  const cy = h / 2;
+  ctx.strokeStyle = 'rgba(255,224,80,0.95)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, cx - 6, cy - 6, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, cx - 12, cy - 10, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,224,80,0.10)';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, cx - 8, cy - 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  scene.textures.addCanvas(key, canvas);
+}
+
+// 정보창에서 클릭 대상 표시용 (붉은 링)
+export function genTargetRing(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const w = 88;
+  const h = 40;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(w / 2, h / 2, w / 2 - 4, h / 2 - 4, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  scene.textures.addCanvas(key, canvas);
 }
 
 // ============================================================
@@ -317,7 +667,6 @@ export function genSkillRing(scene: Phaser.Scene, key: string) {
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
   const c = size / 2;
-  // 방사형 그라디언트 링
   ctx.strokeStyle = 'rgba(255,240,180,0.95)';
   ctx.lineWidth = 6;
   ctx.beginPath();
@@ -328,7 +677,6 @@ export function genSkillRing(scene: Phaser.Scene, key: string) {
   ctx.beginPath();
   ctx.arc(c, c, c - 18, 0, Math.PI * 2);
   ctx.stroke();
-  // 내부 반짝임 삼각 조각
   ctx.fillStyle = 'rgba(255,255,220,0.5)';
   for (let a = 0; a < 8; a++) {
     const ang = (a / 8) * Math.PI * 2;
@@ -343,48 +691,87 @@ export function genSkillRing(scene: Phaser.Scene, key: string) {
 }
 
 // ============================================================
-// 조작(빙의) 중인 유닛 발밑 표시용 선택 링 (납작한 타원)
-// ============================================================
-export function genSelectRing(scene: Phaser.Scene, key: string) {
-  if (scene.textures.exists(key)) return;
-  const w = 96;
-  const h = 48;
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d')!;
-  const cx = w / 2;
-  const cy = h / 2;
-  // 바깥 노란 링
-  ctx.strokeStyle = 'rgba(255,224,80,0.95)';
-  ctx.lineWidth = 6;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, cx - 6, cy - 6, 0, 0, Math.PI * 2);
-  ctx.stroke();
-  // 안쪽 흰 링
-  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, cx - 12, cy - 11, 0, 0, Math.PI * 2);
-  ctx.stroke();
-  // 은은한 채움
-  ctx.fillStyle = 'rgba(255,224,80,0.12)';
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, cx - 8, cy - 8, 0, 0, Math.PI * 2);
-  ctx.fill();
-  scene.textures.addCanvas(key, canvas);
-}
-
-// ============================================================
-// 사망 파티클용 작은 사각 텍스처
+// 파티클 (사망 핏빛 파편 등)
 // ============================================================
 export function genParticle(scene: Phaser.Scene, key: string, color: number) {
   if (scene.textures.exists(key)) return;
   const canvas = document.createElement('canvas');
-  canvas.width = 6;
-  canvas.height = 6;
+  canvas.width = 5;
+  canvas.height = 5;
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = hex(color);
-  ctx.fillRect(0, 0, 6, 6);
+  ctx.fillRect(0, 0, 5, 5);
+  scene.textures.addCanvas(key, canvas);
+}
+
+// ============================================================
+// 지형 데코 (나무 / 바위 / 풀숲)
+// ============================================================
+export function genTree(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(22, 26);
+  g.rect(10, 17, 3, 8, 0x5a3a1a); // 줄기
+  g.vline(12, 17, 24, 0x40280f);
+  const blobs: [number, number, number][] = [
+    [11, 9, 6],
+    [7, 12, 4],
+    [15, 12, 4],
+    [11, 14, 5]
+  ];
+  for (const [bx, by, r] of blobs) {
+    g.disc(bx, by, r, 0x2f7a2f);
+  }
+  // 음영 + 하이라이트
+  for (const [bx, by, r] of blobs) {
+    for (let x = bx - r; x <= bx + r; x++) g.set(x, by + r - 1, 0x1f5a1f);
+    g.set(bx - 1, by - r + 1, 0x4aa04a);
+  }
+  const out = g.outlined(0x123012);
+  blit(scene, key, g, out, 3);
+}
+
+export function genRock(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(18, 14);
+  g.disc(9, 9, 5, 0x8a8a92);
+  g.disc(5, 11, 3, 0x7a7a82);
+  g.disc(13, 11, 3, 0x9a9aa2);
+  for (let x = 4; x <= 14; x++) g.set(x, 6, 0xb2b2ba); // 상단 하이라이트
+  g.rect(6, 10, 3, 1, 0x5a5a62); // 균열
+  const out = g.outlined(0x2a2a30);
+  blit(scene, key, g, out, 3);
+}
+
+export function genBush(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(18, 12);
+  const blobs: [number, number, number][] = [
+    [6, 8, 4],
+    [11, 8, 4],
+    [9, 6, 3]
+  ];
+  for (const [bx, by, r] of blobs) g.disc(bx, by, r, 0x3a7e34);
+  for (const [bx, by, r] of blobs) {
+    for (let x = bx - r; x <= bx + r; x++) g.set(x, by + r - 1, 0x275a24);
+    g.set(bx - 1, by - r + 1, 0x54a048);
+  }
+  const out = g.outlined(0x143012);
+  blit(scene, key, g, out, 3);
+}
+
+// 공용 blit: outline 버퍼를 확대 텍스처로
+function blit(scene: Phaser.Scene, key: string, g: Grid, buf: (number | null)[], scale: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = g.w * scale;
+  canvas.height = g.h * scale;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  for (let y = 0; y < g.h; y++)
+    for (let x = 0; x < g.w; x++) {
+      const c = buf[y * g.w + x];
+      if (c === null) continue;
+      ctx.fillStyle = hex(c);
+      ctx.fillRect(x * scale, y * scale, scale, scale);
+    }
   scene.textures.addCanvas(key, canvas);
 }

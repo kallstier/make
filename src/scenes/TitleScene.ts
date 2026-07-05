@@ -43,7 +43,7 @@ export class TitleScene extends Phaser.Scene {
       ease: 'Sine.InOut'
     });
 
-    const sub = this.add.text(w / 2, h * 0.45, '이야기가 현실이 되는 전장', {
+    const sub = this.add.text(w / 2, h * 0.45, '부대와 부대가 맞붙는 밀집 야전', {
       fontFamily: 'sans-serif',
       fontSize: '20px',
       color: '#cfd8e8'
@@ -86,7 +86,7 @@ export class TitleScene extends Phaser.Scene {
     const hint = this.add.text(
       w / 2,
       h * 0.82,
-      '모바일: 왼쪽 드래그 이동 / 오른쪽 버튼 스킬 / 아군 탭하여 빙의\n데스크톱: WASD·화살표 이동 / 스페이스 스킬 / 아군 클릭 빙의 · Tab 영웅 복귀',
+      '모바일: 왼쪽 드래그 이동 / 오른쪽 버튼 스킬 / 아군 탭 빙의 · 유닛 탭 정보\n데스크톱: WASD·화살표 이동 / 스페이스 스킬 / 아군 클릭 빙의 · Tab 영웅 복귀',
       {
         fontFamily: 'sans-serif',
         fontSize: '16px',

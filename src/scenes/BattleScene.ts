@@ -1,36 +1,68 @@
 import Phaser from 'phaser';
-import { WORLD, HERO, STRONGHOLD, START_ALLY_SOLDIERS, AI, TAP } from '../config';
+import {
+  WORLD,
+  GAME,
+  HERO,
+  AI,
+  TAP,
+  CROWD,
+  FX,
+  FORMATION,
+  OUTCOME,
+  SQUADS,
+  UnitType,
+  SquadDef
+} from '../config';
 import { Unit, Faction, BattleContext } from '../units/Unit';
 import { Hero } from '../units/Hero';
-import { Soldier } from '../units/Soldier';
+import { Soldier, SoldierKind } from '../units/Soldier';
 import { Monster, MonsterKind } from '../units/Monster';
 import { Projectile } from '../units/Projectile';
-import { Stronghold, StrongholdDef } from '../world/Stronghold';
-import { genWorldBackground } from '../world/MapGen';
+import { genBattlefield } from '../world/MapGen';
 import { FloatingStick } from '../input/FloatingStick';
-
-const MAX_ENEMIES = 70;
-const MAX_ALLIES = 70;
+import { FRAME } from '../gen/spriteGen';
 
 export type GameState = 'playing' | 'win' | 'lose';
 
-const STRONGHOLD_DEFS: StrongholdDef[] = [
-  { id: 'hanyang', name: '한양', x: 360, y: 1180, owner: 'ally' },
-  { id: 'pyongyang', name: '평양', x: 520, y: 460, owner: 'enemy' },
-  { id: 'beijing', name: '베이징', x: 1200, y: 300, owner: 'enemy' },
-  { id: 'shanghai', name: '상하이', x: 1950, y: 720, owner: 'enemy' },
-  { id: 'kyoto', name: '교토', x: 1980, y: 1360, owner: 'enemy' }
-];
+const TYPE_NAME: Record<UnitType, string> = {
+  hero: '영웅',
+  melee: '검병',
+  ranged: '궁병',
+  spear: '창병',
+  goblin: '고블린',
+  goblinArcher: '고블린 궁수',
+  oni: '오니'
+};
+
+interface SquadRuntime {
+  def: SquadDef;
+  members: Unit[];
+  banner: Phaser.GameObjects.Image;
+}
+
+interface Spawn {
+  type: UnitType;
+  squadId: number;
+  x: number;
+  y: number;
+}
+
+export interface BattleResult {
+  win: boolean;
+  allyDead: number;
+  enemyDead: number;
+  heroKills: number;
+  playerKills: number;
+}
 
 export class BattleScene extends Phaser.Scene {
   private hero!: Hero;
-  private allies: Soldier[] = [];
-  private enemies: Monster[] = [];
-  private strongholds: Stronghold[] = [];
+  private allies: Unit[] = [];
+  private enemies: Unit[] = [];
+  private squads: SquadRuntime[] = [];
 
   private allyGroup!: Phaser.Physics.Arcade.Group;
   private enemyGroup!: Phaser.Physics.Arcade.Group;
-
   private projectiles: Projectile[] = [];
 
   private stick!: FloatingStick;
@@ -44,21 +76,37 @@ export class BattleScene extends Phaser.Scene {
   };
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
 
-  // 유닛 전환(빙의)
-  private controlled!: Unit;             // 현재 조작 중인 아군 유닛
+  // 빙의(조작) & 정보 선택
+  private controlled!: Unit;
+  private selected!: Unit; // 하단 정보창에 표시되는 유닛 (적 포함)
   private selectRing!: Phaser.GameObjects.Image;
+  private targetRing!: Phaser.GameObjects.Image;
   private tapDownTime = 0;
   private tapDownX = 0;
   private tapDownY = 0;
 
   private frameCount = 0;
   private gameState: GameState = 'playing';
+  private battleStartTime = 0;
 
-  // 스폰 그리드 (타겟 탐색용)
   private allyGrid = new Map<number, Unit[]>();
   private enemyGrid = new Map<number, Unit[]>();
+  private crowdGrid = new Map<number, Unit[]>();
+  private hpGfx!: Phaser.GameObjects.Graphics;
+  private allyCentroid: { x: number; y: number } | null = null;
+  private enemyCentroid: { x: number; y: number } | null = null;
 
-  private captureInfo: { name: string; progress: number } | null = null;
+  private allyStart = 0;
+  private enemyStart = 0;
+  private allyDead = 0;
+  private enemyDead = 0;
+  private playerKills = 0;
+  private result: BattleResult | null = null;
+
+  // FX 풀
+  private dmgPool: Phaser.GameObjects.Text[] = [];
+  private sparkPool: Phaser.GameObjects.Image[] = [];
+
   private ctx!: BattleContext;
 
   constructor() {
@@ -70,89 +118,92 @@ export class BattleScene extends Phaser.Scene {
     this.frameCount = 0;
     this.allies = [];
     this.enemies = [];
-    this.strongholds = [];
+    this.squads = [];
     this.projectiles = [];
-    this.captureInfo = null;
+    this.dmgPool = [];
+    this.sparkPool = [];
+    this.allyDead = 0;
+    this.enemyDead = 0;
+    this.playerKills = 0;
+    this.result = null;
+    this.battleStartTime = this.time.now;
 
     this.physics.world.setBounds(0, 0, WORLD.width, WORLD.height);
     this.cameras.main.setBounds(0, 0, WORLD.width, WORLD.height);
+    this.cameras.main.setBackgroundColor('#31502b'); // 개전 줌아웃 시 여백을 초원 톤으로
 
-    // 배경 + 데코
-    const decos = genWorldBackground(
-      this,
-      STRONGHOLD_DEFS.map((d) => ({ x: d.x, y: d.y }))
-    );
-    this.add.image(0, 0, 'worldbg').setOrigin(0, 0).setDepth(0);
+    // 전장 배경 + 데코
+    const decos = genBattlefield(this);
+    this.add.image(0, 0, 'battlefield').setOrigin(0, 0).setDepth(0);
     for (const d of decos) {
-      const img = this.add.image(d.x, d.y, d.type === 'tree' ? 'tree' : 'rock');
-      img.setDepth(2);
+      const img = this.add.image(d.x, d.y, d.type);
+      img.setOrigin(0.5, 0.85);
+      img.setDepth(d.type === 'rock' || d.type === 'bush' ? 3 : 5 + (d.y % 3));
+      // 나무/큰 데코는 y 기준 깊이 정렬 근사
+      if (d.type === 'tree') img.setDepth(6);
     }
 
-    // 그룹
     this.allyGroup = this.physics.add.group();
     this.enemyGroup = this.physics.add.group();
 
-    // 전장 컨텍스트
     this.ctx = {
       time: 0,
       findNearestEnemy: (f, x, y, r) => this.findNearestEnemy(f, x, y, r),
       spawnProjectile: (x, y, t, dmg, f, s) => this.spawnProjectile(x, y, t, dmg, f, s),
-      onUnitDied: (u) => this.onUnitDied(u),
-      emitDeathParticles: (x, y, c) => this.emitDeathParticles(x, y, c),
+      onUnitDied: (u, k) => this.onUnitDied(u, k),
+      spawnCorpse: (u) => this.spawnCorpse(u),
+      spawnDamageNumber: (x, y, a, f) => this.spawnDamageNumber(x, y, a, f),
+      spawnSpark: (x, y) => this.spawnSpark(x, y),
+      emitBlood: (x, y, c) => this.emitBlood(x, y, c),
       heroRef: () => (this.hero && this.hero.alive ? this.hero : null),
       controlledRef: () =>
         this.controlled && this.controlled.alive
           ? this.controlled
           : this.hero && this.hero.alive
           ? this.hero
-          : null
+          : null,
+      combatActive: () => this.time.now - this.battleStartTime >= FORMATION.marchStartDelay,
+      rallyPoint: (f) => (f === 'ally' ? this.enemyCentroid : this.allyCentroid)
     };
 
-    // 거점
-    for (const def of STRONGHOLD_DEFS) {
-      const s = new Stronghold(this, def);
-      this.strongholds.push(s);
-      // 적 거점 초기 수비대
-      if (def.owner === 'enemy') {
-        const n = 3 + Math.floor(Math.random() * 2);
-        for (let i = 0; i < n; i++) {
-          this.spawnMonster(def.x, def.y, Math.random() < 0.75 ? 'goblin' : 'oni');
-        }
-      }
-    }
-
-    // 영웅 (한양에서 시작)
-    const start = STRONGHOLD_DEFS[0];
-    this.hero = new Hero(this, start.x + 40, start.y + 40);
-    this.allyGroup.add(this.hero);
-
-    // 아군 병사
-    for (let i = 0; i < START_ALLY_SOLDIERS; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 40 + Math.random() * 120;
-      this.spawnSoldier(
-        start.x + Math.cos(a) * r,
-        start.y + Math.sin(a) * r,
-        Math.random() < 0.6 ? 'melee' : 'ranged'
-      );
-    }
+    // 부대 편성 스폰
+    this.spawnArmies();
+    this.allyStart = this.allies.length;
+    this.enemyStart = this.enemies.length;
 
     // 투사체 풀
+    for (let i = 0; i < 32; i++) this.projectiles.push(new Projectile(this));
+
+    // FX 풀
     for (let i = 0; i < 40; i++) {
-      this.projectiles.push(new Projectile(this));
+      const t = this.add.text(0, 0, '', {
+        fontFamily: 'monospace',
+        fontSize: '13px',
+        color: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 3
+      });
+      t.setOrigin(0.5).setDepth(40).setActive(false).setVisible(false);
+      this.dmgPool.push(t);
+    }
+    for (let i = 0; i < 24; i++) {
+      const s = this.add.image(0, 0, 'spark');
+      s.setDepth(19).setActive(false).setVisible(false);
+      this.sparkPool.push(s);
     }
 
-    // 물리 충돌: 같은 진영끼리 겹침 방지
-    this.physics.add.collider(this.allyGroup, this.allyGroup);
-    this.physics.add.collider(this.enemyGroup, this.enemyGroup);
+    // 밀집 난전의 "뒤엉켜 밀치는" 느낌은 전 진영 분리(separation) 스티어링이 담당한다
+    // (Arcade 원형 바디는 유지하되 교차 진영 하드 충돌은 분리 스티어링으로 대체 — 밀집 시 성능)
 
-    // 조작 대상: 시작은 영웅
+    // HP바 배치 렌더용 공용 Graphics
+    this.hpGfx = this.add.graphics().setDepth(20);
+
+    // 조작 대상 = 영웅
     this.controlled = this.hero;
+    this.selected = this.hero;
     this.hero.playerControlled = true;
 
-    // 조작 유닛 발밑 선택 링
-    this.selectRing = this.add.image(this.hero.x, this.hero.y, 'selectRing');
-    this.selectRing.setDepth(6);
+    this.selectRing = this.add.image(this.hero.x, this.hero.y, 'selectRing').setDepth(6);
     this.tweens.add({
       targets: this.selectRing,
       alpha: { from: 0.6, to: 1 },
@@ -161,6 +212,7 @@ export class BattleScene extends Phaser.Scene {
       repeat: -1,
       ease: 'Sine.InOut'
     });
+    this.targetRing = this.add.image(0, 0, 'targetRing').setDepth(6).setVisible(false);
 
     // 입력
     this.stick = new FloatingStick(this);
@@ -174,36 +226,123 @@ export class BattleScene extends Phaser.Scene {
       space: kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE),
       tab: kb.addKey(Phaser.Input.Keyboard.KeyCodes.TAB)
     };
-    // Tab 기본 포커스 이동 방지
     kb.addCapture('TAB');
-
-    // 아군 유닛 탭/클릭 -> 조작 전환
     this.input.on('pointerdown', this.onPointerDown, this);
     this.input.on('pointerup', this.onPointerUp, this);
 
-    // 카메라 추적 (부드러운 lerp)
-    this.cameras.main.startFollow(this.controlled, true, 0.08, 0.08);
-    this.cameras.main.setZoom(1);
+    // 카메라 개전 연출: 전장 전체 줌아웃 → 줌인 추적
+    const fit = Math.min(GAME.width / WORLD.width, GAME.height / WORLD.height);
+    this.cameras.main.setZoom(fit);
+    this.cameras.main.centerOn(WORLD.width / 2, WORLD.height / 2);
+    this.time.delayedCall(150, () => {
+      this.tweens.add({
+        targets: this.cameras.main,
+        zoom: 1,
+        duration: 1500,
+        ease: 'Cubic.InOut',
+        onComplete: () => this.cameras.main.startFollow(this.controlled, true, 0.08, 0.08)
+      });
+    });
 
-    // 디버그 훅 (자동화 테스트에서 좌표/상태 확인용)
-    (window as any).__debug = {
-      heroPos: () => (this.hero && this.hero.alive ? { x: this.hero.x, y: this.hero.y } : null),
-      controlledPos: () =>
-        this.controlled && this.controlled.alive ? { x: this.controlled.x, y: this.controlled.y } : null,
-      controlledUid: () => (this.controlled ? this.controlled.uid : -1),
-      controllingHero: () => this.controlled === this.hero,
-      state: () => this.gameState,
-      allyCount: () => this.allies.length,
-      enemyCount: () => this.enemies.length,
-      selectAlly: (i: number) => {
-        const u = this.allies[i];
-        if (u && u.alive) this.selectUnit(u);
-        return u ? u.uid : -1;
-      }
-    };
+    this.installDebug();
   }
 
-  // ---------- 유닛 전환(빙의) ----------
+  // ---------- 스폰 ----------
+  private spawnArmies() {
+    const allySquads = SQUADS.filter((s) => s.faction === 'ally');
+    const enemySquads = SQUADS.filter((s) => s.faction === 'enemy');
+    const spawns = [
+      ...this.layoutFaction(allySquads, 'ally'),
+      ...this.layoutFaction(enemySquads, 'enemy')
+    ];
+
+    // 부대 런타임 준비
+    for (const def of SQUADS) {
+      const banner = this.add.image(0, 0, `banner_${def.id}`).setDepth(14).setVisible(false);
+      this.squads.push({ def, members: [], banner });
+    }
+
+    const labelCount = new Map<string, number>();
+    for (const sp of spawns) {
+      const u = this.createUnit(sp);
+      const sqName = SQUADS[sp.squadId].name;
+      const key = `${sp.squadId}_${sp.type}`;
+      const idx = (labelCount.get(key) ?? 0) + 1;
+      labelCount.set(key, idx);
+      u.label = sp.type === 'hero' ? `${sqName} 영웅` : `${sqName} ${TYPE_NAME[sp.type]} #${idx}`;
+      this.squads[this.squads.findIndex((r) => r.def.id === sp.squadId)].members.push(u);
+    }
+  }
+
+  private layoutFaction(squads: SquadDef[], faction: Faction): Spawn[] {
+    const blocks = squads.map((sq) => {
+      const total = sq.composition.reduce((a, c) => a + c.count, 0);
+      const width = Math.ceil(total / FORMATION.cols); // 횡대 폭(유닛 수)
+      return { sq, total, width };
+    });
+    const totalH = blocks.reduce((a, b) => a + b.width * FORMATION.rowSpacing, 0) + (blocks.length - 1) * FORMATION.squadGap;
+    let cursorY = WORLD.height / 2 - totalH / 2;
+    const spawns: Spawn[] = [];
+
+    for (const b of blocks) {
+      const blockH = b.width * FORMATION.rowSpacing;
+      const centerY = cursorY + blockH / 2;
+      // 유닛 타입 나열 후 근접(front)→원거리(back) 정렬
+      const types: UnitType[] = [];
+      for (const c of b.sq.composition) for (let k = 0; k < c.count; k++) types.push(c.type);
+      types.sort((a, z) => this.roleRank(a) - this.roleRank(z));
+
+      types.forEach((t, i) => {
+        const depth = Math.floor(i / b.width); // 0 = 최전선
+        const lat = i % b.width;
+        const bx =
+          faction === 'ally'
+            ? FORMATION.allyLineX - depth * FORMATION.colSpacing
+            : FORMATION.enemyLineX + depth * FORMATION.colSpacing;
+        const by = centerY + (lat - (b.width - 1) / 2) * FORMATION.rowSpacing;
+        const jx = (Math.random() - 0.5) * 2 * FORMATION.jitter;
+        const jy = (Math.random() - 0.5) * 2 * FORMATION.jitter;
+        spawns.push({ type: t, squadId: b.sq.id, x: bx + jx, y: by + jy });
+      });
+      cursorY += blockH + FORMATION.squadGap;
+    }
+    return spawns;
+  }
+
+  private roleRank(t: UnitType): number {
+    return t === 'ranged' || t === 'goblinArcher' ? 1 : 0; // 원거리 후열
+  }
+
+  private createUnit(sp: Spawn): Unit {
+    if (sp.type === 'hero') {
+      this.hero = new Hero(this, sp.x, sp.y, sp.squadId);
+      this.allyGroup.add(this.hero);
+      this.allies.push(this.hero);
+      return this.hero;
+    }
+    if (sp.type === 'melee' || sp.type === 'ranged' || sp.type === 'spear') {
+      const s = new Soldier(this, sp.x, sp.y, sp.type as SoldierKind, sp.squadId);
+      this.allyGroup.add(s);
+      this.allies.push(s);
+      return s;
+    }
+    const m = new Monster(this, sp.x, sp.y, sp.type as MonsterKind, sp.squadId);
+    this.enemyGroup.add(m);
+    this.enemies.push(m);
+    return m;
+  }
+
+  private spawnProjectile(x: number, y: number, target: Unit, damage: number, faction: Faction, speed: number) {
+    let p = this.projectiles.find((pr) => !pr.active);
+    if (!p) {
+      p = new Projectile(this);
+      this.projectiles.push(p);
+    }
+    // shooter 추적: 발사 유닛은 사거리 내 자기 진영이 아닌 유닛 — 간단히 null 처리(넉백/킬은 근접 위주)
+    p.fire(x, y, target, damage, faction, speed, null);
+  }
+
+  // ---------- 선택 / 빙의 ----------
   private onPointerDown(pointer: Phaser.Input.Pointer) {
     this.tapDownTime = this.time.now;
     this.tapDownX = pointer.x;
@@ -214,15 +353,20 @@ export class BattleScene extends Phaser.Scene {
     if (this.gameState !== 'playing') return;
     const dur = this.time.now - this.tapDownTime;
     const moved = Math.hypot(pointer.x - this.tapDownX, pointer.y - this.tapDownY);
-    // 탭 판정 실패 -> 스틱(드래그) 로직에 맡김
     if (dur > TAP.maxDurationMs || moved > TAP.maxMoveDist) return;
     const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-    const target = this.pickAllyAt(wp.x, wp.y);
-    if (target) this.selectUnit(target);
+    this.clickAt(wp.x, wp.y);
   }
 
-  // 월드 좌표에서 가장 가까운 아군 유닛(영웅/병사) 선택
-  private pickAllyAt(wx: number, wy: number): Unit | null {
+  // 월드 좌표 클릭: 아군이면 빙의+정보, 적이면 정보만
+  private clickAt(wx: number, wy: number) {
+    const u = this.pickUnitAt(wx, wy);
+    if (!u) return;
+    this.selected = u;
+    if (u.faction === 'ally') this.possess(u);
+  }
+
+  private pickUnitAt(wx: number, wy: number): Unit | null {
     let best: Unit | null = null;
     let bestD = TAP.pickRadius * TAP.pickRadius;
     const consider = (u: Unit) => {
@@ -235,17 +379,17 @@ export class BattleScene extends Phaser.Scene {
         best = u;
       }
     };
-    if (this.hero && this.hero.alive) consider(this.hero);
     for (const a of this.allies) consider(a);
+    for (const e of this.enemies) consider(e);
     return best;
   }
 
-  private selectUnit(u: Unit) {
-    if (!u.alive || u === this.controlled) return;
+  private possess(u: Unit) {
+    if (!u.alive || u === this.controlled || u.faction !== 'ally') return;
     if (this.controlled && this.controlled.alive) {
       this.controlled.playerControlled = false;
       this.controlled.setMoveInput(0, 0);
-      this.halt(this.controlled);
+      this.controlled.stopMotion();
     }
     this.controlled = u;
     u.playerControlled = true;
@@ -253,83 +397,115 @@ export class BattleScene extends Phaser.Scene {
     this.cameras.main.startFollow(u, true, 0.08, 0.08);
   }
 
-  private halt(u: Unit) {
-    const body = u.body as Phaser.Physics.Arcade.Body | null;
-    if (body) body.setVelocity(0, 0);
-  }
-
-  // ---------- 스폰 ----------
-  private spawnSoldier(x: number, y: number, kind: 'melee' | 'ranged') {
-    if (this.allies.length >= MAX_ALLIES) return;
-    const s = new Soldier(this, x, y, kind);
-    this.allies.push(s);
-    this.allyGroup.add(s);
-  }
-
-  private spawnMonster(x: number, y: number, kind: MonsterKind, isRaid = false) {
-    if (this.enemies.length >= MAX_ENEMIES) return;
-    const m = new Monster(this, x, y, kind, isRaid);
-    this.enemies.push(m);
-    this.enemyGroup.add(m);
-    return m;
-  }
-
-  private spawnProjectile(x: number, y: number, target: Unit, damage: number, faction: Faction, speed: number) {
-    let p = this.projectiles.find((pr) => !pr.active);
-    if (!p) {
-      p = new Projectile(this);
-      this.projectiles.push(p);
-    }
-    p.fire(x, y, target, damage, faction, speed);
-  }
-
-  // ---------- 사망 처리 ----------
-  private onUnitDied(unit: Unit) {
+  // ---------- 사망 ----------
+  private onUnitDied(unit: Unit, killer: Unit | null) {
     if (unit.faction === 'ally') {
       const i = this.allies.findIndex((a) => a.uid === unit.uid);
       if (i >= 0) this.allies.splice(i, 1);
+      this.allyDead++;
     } else {
       const i = this.enemies.findIndex((e) => e.uid === unit.uid);
       if (i >= 0) this.enemies.splice(i, 1);
+      this.enemyDead++;
     }
-    // 조작 중이던 병사가 죽으면 영웅에게 조작 복귀
+    if (killer && killer.playerControlled) this.playerKills++;
+
+    // 조작 중이던 유닛 사망 → 영웅 복귀
     if (unit === this.controlled && unit !== this.hero && this.hero.alive) {
-      this.controlled = this.hero;
-      this.hero.playerControlled = true;
-      this.hero.setMoveInput(0, 0);
-      this.cameras.main.startFollow(this.hero, true, 0.08, 0.08);
+      this.possessHeroFallback();
+    }
+    // 정보 선택 대상 사망 → 조작 유닛으로 되돌림
+    if (unit === this.selected) {
+      this.selected = this.controlled && this.controlled.alive ? this.controlled : this.hero;
     }
   }
 
-  private emitDeathParticles(x: number, y: number, color: number) {
+  private possessHeroFallback() {
+    this.controlled = this.hero;
+    this.hero.playerControlled = true;
+    this.hero.setMoveInput(0, 0);
+    this.cameras.main.startFollow(this.hero, true, 0.08, 0.08);
+  }
+
+  private spawnCorpse(unit: Unit) {
+    const corpse = this.add.image(unit.x, unit.y, unit.texture.key, FRAME.CORPSE);
+    corpse.setFlipX(unit.flipX);
+    corpse.setDepth(2);
+    corpse.setAlpha(0.95);
+    this.tweens.add({
+      targets: corpse,
+      alpha: 0,
+      delay: FX.corpseLifespan,
+      duration: FX.corpseFade,
+      onComplete: () => corpse.destroy()
+    });
+  }
+
+  private emitBlood(x: number, y: number, color: number) {
     const key =
-      color === 0x8a3bd2 ? 'p_oni' : color === 0x3b6ef0 ? 'p_ally' : color === 0xffd23b ? 'p_hero' : 'p_enemy';
+      color === 0xffd23b ? 'blood_hero' : color === 0xd23b3b ? 'blood_oni' : color === 0x6bbf4a ? 'blood_enemy' : 'blood_ally';
     const emitter = this.add.particles(x, y, key, {
-      speed: { min: 40, max: 120 },
+      speed: { min: 30, max: 110 },
       angle: { min: 0, max: 360 },
+      gravityY: 140,
       scale: { start: 1, end: 0 },
-      lifespan: 420,
-      quantity: 8,
+      lifespan: 380,
+      quantity: 7,
       emitting: false
     });
     emitter.setDepth(18);
-    emitter.explode(8);
-    this.time.delayedCall(500, () => emitter.destroy());
+    emitter.explode(7);
+    this.time.delayedCall(450, () => emitter.destroy());
   }
 
-  // ---------- 타겟 탐색 (그리드) ----------
-  private cellKey(x: number, y: number): number {
-    const cx = Math.floor(x / AI.gridCellSize);
-    const cy = Math.floor(y / AI.gridCellSize);
-    return cx * 1000 + cy;
+  private spawnDamageNumber(x: number, y: number, amount: number, faction: Faction) {
+    const t = this.dmgPool.find((d) => !d.active);
+    if (!t) return;
+    t.setActive(true).setVisible(true);
+    t.setText(String(amount));
+    t.setColor(faction === 'ally' ? '#ff9a9a' : '#fff2c0');
+    t.setPosition(x + (Math.random() - 0.5) * 6, y);
+    t.setAlpha(1);
+    t.setScale(1);
+    this.tweens.add({
+      targets: t,
+      y: y - FX.damageNumberRise,
+      alpha: 0,
+      duration: FX.damageNumberLifespan,
+      ease: 'Quad.Out',
+      onComplete: () => t.setActive(false).setVisible(false)
+    });
+  }
+
+  private spawnSpark(x: number, y: number) {
+    const s = this.sparkPool.find((sp) => !sp.active);
+    if (!s) return;
+    s.setActive(true).setVisible(true);
+    s.setPosition(x, y);
+    s.setAlpha(1);
+    s.setScale(0.6);
+    s.setAngle(Math.random() * 360);
+    this.tweens.add({
+      targets: s,
+      scale: 1.2,
+      alpha: 0,
+      duration: FX.sparkLifespan,
+      ease: 'Quad.Out',
+      onComplete: () => s.setActive(false).setVisible(false)
+    });
+  }
+
+  // ---------- 그리드 ----------
+  private cellKey(x: number, y: number, size: number): number {
+    return Math.floor(x / size) * 4096 + Math.floor(y / size);
   }
 
   private rebuildGrids() {
     this.allyGrid.clear();
     this.enemyGrid.clear();
-    const push = (grid: Map<number, Unit[]>, u: Unit) => {
-      if (!u.alive) return;
-      const k = this.cellKey(u.x, u.y);
+    this.crowdGrid.clear();
+    const push = (grid: Map<number, Unit[]>, u: Unit, size: number) => {
+      const k = this.cellKey(u.x, u.y, size);
       let arr = grid.get(k);
       if (!arr) {
         arr = [];
@@ -337,12 +513,36 @@ export class BattleScene extends Phaser.Scene {
       }
       arr.push(u);
     };
-    if (this.hero && this.hero.alive) push(this.allyGrid, this.hero);
-    for (const a of this.allies) push(this.allyGrid, a);
-    for (const e of this.enemies) push(this.enemyGrid, e);
+    for (const a of this.allies) {
+      if (!a.alive) continue;
+      push(this.allyGrid, a, AI.gridCellSize);
+      push(this.crowdGrid, a, CROWD.gridCellSize);
+    }
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      push(this.enemyGrid, e, AI.gridCellSize);
+      push(this.crowdGrid, e, CROWD.gridCellSize);
+    }
   }
 
-  // searcherFaction 기준으로 반대 진영에서 가장 가까운 유닛
+  private updateCentroids() {
+    this.allyCentroid = this.centroid(this.allies);
+    this.enemyCentroid = this.centroid(this.enemies);
+  }
+
+  private centroid(list: Unit[]): { x: number; y: number } | null {
+    let sx = 0;
+    let sy = 0;
+    let n = 0;
+    for (const u of list) {
+      if (!u.alive) continue;
+      sx += u.x;
+      sy += u.y;
+      n++;
+    }
+    return n > 0 ? { x: sx / n, y: sy / n } : null;
+  }
+
   findNearestEnemy(searcherFaction: Faction, x: number, y: number, range: number): Unit | null {
     const grid = searcherFaction === 'ally' ? this.enemyGrid : this.allyGrid;
     const reach = Math.ceil(range / AI.gridCellSize);
@@ -352,7 +552,7 @@ export class BattleScene extends Phaser.Scene {
     let bestD = range * range;
     for (let gx = cx - reach; gx <= cx + reach; gx++) {
       for (let gy = cy - reach; gy <= cy + reach; gy++) {
-        const arr = grid.get(gx * 1000 + gy);
+        const arr = grid.get(gx * 4096 + gy);
         if (!arr) continue;
         for (const u of arr) {
           if (!u.alive) continue;
@@ -369,62 +569,71 @@ export class BattleScene extends Phaser.Scene {
     return best;
   }
 
+  // 분리(separation) 스티어링 + 최종 속도 적용
+  private applyCrowdAndMove() {
+    const size = CROWD.gridCellSize;
+    const apply = (u: Unit) => {
+      if (!u.alive) return;
+      let sx = 0;
+      let sy = 0;
+      const cx = Math.floor(u.x / size);
+      const cy = Math.floor(u.y / size);
+      const ur = u.sepRadius;
+      for (let gx = cx - 1; gx <= cx + 1; gx++) {
+        for (let gy = cy - 1; gy <= cy + 1; gy++) {
+          const arr = this.crowdGrid.get(gx * 4096 + gy);
+          if (!arr) continue;
+          for (const n of arr) {
+            if (n === u || !n.alive) continue;
+            const dx = u.x - n.x;
+            const dy = u.y - n.y;
+            const d = Math.hypot(dx, dy);
+            const thr = ur + n.sepRadius;
+            if (d > 0 && d < thr) {
+              const w = (thr - d) / thr;
+              sx += (dx / d) * w;
+              sy += (dy / d) * w;
+            }
+          }
+        }
+      }
+      const mag = Math.hypot(sx, sy);
+      if (mag > 0) {
+        const s = Math.min(mag, 1.4) * CROWD.separationForce;
+        sx = (sx / mag) * s;
+        sy = (sy / mag) * s;
+      }
+      const body = u.body as Phaser.Physics.Arcade.Body;
+      body.setVelocity(u.dvx + u.kbx + sx, u.dvy + u.kby + sy);
+      u.kbx *= 0.8;
+      u.kby *= 0.8;
+      // 전장 이탈 방지 (안전 클램프)
+      if (u.x < 10) u.x = 10;
+      else if (u.x > WORLD.width - 10) u.x = WORLD.width - 10;
+      if (u.y < 10) u.y = 10;
+      else if (u.y > WORLD.height - 10) u.y = WORLD.height - 10;
+    };
+    for (const a of this.allies) apply(a);
+    for (const e of this.enemies) apply(e);
+  }
+
   // ---------- 스킬 ----------
   requestSkill() {
     if (this.gameState !== 'playing' || !this.hero.alive) return;
-    // 스킬은 영웅 조작 중에만 사용 가능
     if (this.controlled !== this.hero) return;
     const now = this.time.now;
     if (this.hero.tryUseSkill(this.ctx, now)) {
-      // 반경 내 모든 적에게 대미지
       const r2 = HERO.skillRadius * HERO.skillRadius;
-      const targets = this.enemies.slice();
-      for (const e of targets) {
+      for (const e of this.enemies.slice()) {
         const dx = e.x - this.hero.x;
         const dy = e.y - this.hero.y;
-        if (dx * dx + dy * dy <= r2) {
-          e.takeDamage(HERO.skillDamage, this.ctx);
-        }
+        if (dx * dx + dy * dy <= r2) e.takeDamage(HERO.skillDamage, this.ctx, this.hero);
       }
     }
   }
 
   getSkillCdRatio(): number {
-    if (!this.hero) return 1;
-    return this.hero.skillCooldownRatio(this.time.now);
-  }
-
-  // ---------- UI용 게터 ----------
-  getHeroHp() {
-    return { hp: Math.max(0, Math.ceil(this.hero?.hp ?? 0)), max: HERO.hp };
-  }
-  isControllingHero() {
-    return this.controlled === this.hero;
-  }
-  // 현재 조작 중인 유닛의 HP + 라벨 (HUD 메인 바용)
-  getControlledHp() {
-    const u = this.controlled;
-    if (!u || u === this.hero) {
-      return { hp: Math.max(0, Math.ceil(this.hero?.hp ?? 0)), max: HERO.hp, label: '영웅' };
-    }
-    let label = '병사';
-    const kind = (u as Soldier).kind;
-    if (kind === 'melee') label = '검병';
-    else if (kind === 'ranged') label = '궁병';
-    return { hp: Math.max(0, Math.ceil(u.hp)), max: u.maxHp, label };
-  }
-  getAllyCount() {
-    return this.allies.length;
-  }
-  getStrongholdCounts() {
-    const ally = this.strongholds.filter((s) => s.owner === 'ally').length;
-    return { ally, total: this.strongholds.length };
-  }
-  getCaptureInfo() {
-    return this.captureInfo;
-  }
-  getGameState() {
-    return this.gameState;
+    return this.hero ? this.hero.skillCooldownRatio(this.time.now) : 1;
   }
 
   restart() {
@@ -433,29 +642,52 @@ export class BattleScene extends Phaser.Scene {
     this.scene.launch('UIScene');
   }
 
+  // ---------- UI 게터 ----------
+  getHeroHp() {
+    return { hp: Math.max(0, Math.ceil(this.hero?.hp ?? 0)), max: HERO.hp };
+  }
+  isControllingHero() {
+    return this.controlled === this.hero;
+  }
+  getCounts() {
+    return { ally: this.allies.length, enemy: this.enemies.length };
+  }
+  getGameState() {
+    return this.gameState;
+  }
+  getResult(): BattleResult | null {
+    return this.result;
+  }
+
+  // 하단 정보창용: 현재 정보 표시 대상
+  getInfoUnit() {
+    const u = this.selected && this.selected.alive ? this.selected : this.controlled;
+    if (!u || !u.alive) return null;
+    return {
+      label: u.label,
+      typeName: TYPE_NAME[u.unitType],
+      hp: Math.max(0, Math.ceil(u.hp)),
+      max: u.maxHp,
+      kills: u.kills,
+      faction: u.faction,
+      textureKey: u.texture.key,
+      possessed: u === this.controlled
+    };
+  }
+
   // ---------- 메인 루프 ----------
   update(time: number, delta: number) {
     if (this.gameState !== 'playing') return;
     this.ctx.time = time;
     this.frameCount++;
 
-    // 입력 -> 조작 유닛 이동
     this.handleInput();
-
-    // 그리드 재구성 (매 프레임 — 유닛 수 적당해 저렴)
     this.rebuildGrids();
+    this.updateCentroids();
 
-    // 조작 중인 유닛: 플레이어 입력으로 갱신 (AI 정지)
-    if (this.controlled && this.controlled.alive) {
-      this.controlled.playerUpdate(delta, this.ctx);
-    }
+    if (this.controlled && this.controlled.alive) this.controlled.playerUpdate(delta, this.ctx);
+    if (this.hero.alive && this.controlled !== this.hero) this.hero.aiTick(delta, this.ctx);
 
-    // 조작하지 않는 영웅: 자율 AI (단일 유닛이라 매 프레임 처리)
-    if (this.hero.alive && this.controlled !== this.hero) {
-      this.hero.aiTick(delta, this.ctx);
-    }
-
-    // 스태거드 AI 틱 (조작 중인 유닛은 제외)
     const group = this.frameCount % AI.tickGroups;
     for (const a of this.allies) {
       if (a === this.controlled) continue;
@@ -465,150 +697,122 @@ export class BattleScene extends Phaser.Scene {
       if (e.uid % AI.tickGroups === group) e.aiTick(delta, this.ctx);
     }
 
-    // 선택 링을 조작 유닛 발밑에 배치
+    // 분리 + 이동
+    this.applyCrowdAndMove();
+
+    // 링
     if (this.controlled && this.controlled.alive) {
       this.selectRing.setVisible(true);
-      this.selectRing.setPosition(this.controlled.x, this.controlled.y + this.controlled.height * 0.28);
+      this.selectRing.setPosition(this.controlled.x, this.controlled.y + this.controlled.height * 0.32);
     } else {
       this.selectRing.setVisible(false);
     }
-
-    // 투사체
-    for (const p of this.projectiles) {
-      if (p.active) p.tick(delta, this.ctx);
+    if (this.selected && this.selected.alive && this.selected !== this.controlled) {
+      this.targetRing.setVisible(true);
+      this.targetRing.setPosition(this.selected.x, this.selected.y + this.selected.height * 0.32);
+    } else {
+      this.targetRing.setVisible(false);
     }
 
-    // HP바 갱신
-    if (this.hero.alive) this.hero.drawHpBar();
-    for (const a of this.allies) a.drawHpBar();
-    for (const e of this.enemies) e.drawHpBar();
+    // 부대 배너 (선두 생존 유닛 위)
+    for (const sr of this.squads) {
+      const lead = sr.members.find((m) => m.alive);
+      if (lead) {
+        sr.banner.setVisible(true);
+        sr.banner.setPosition(lead.x, lead.y - lead.height * 0.5 - 8);
+      } else {
+        sr.banner.setVisible(false);
+      }
+    }
 
-    // 거점 로직
-    this.updateStrongholds(time, delta);
+    // 투사체
+    for (const p of this.projectiles) if (p.active) p.tick(delta, this.ctx);
 
-    // 승패 판정
+    // HP바 (배치 렌더 — 단일 Graphics)
+    this.hpGfx.clear();
+    for (const a of this.allies) a.drawHpBarInto(this.hpGfx);
+    for (const e of this.enemies) e.drawHpBarInto(this.hpGfx);
+
     this.checkGameEnd();
   }
 
   private handleInput() {
-    // Tab: 영웅으로 조작 복귀
     if (Phaser.Input.Keyboard.JustDown(this.keys.tab)) {
-      if (this.hero.alive) this.selectUnit(this.hero);
+      if (this.hero.alive) {
+        this.possess(this.hero);
+        this.selected = this.hero;
+      }
     }
-
     let vx = 0;
     let vy = 0;
-    // 키보드
     if (this.keys.left.isDown || this.cursors.left.isDown) vx -= 1;
     if (this.keys.right.isDown || this.cursors.right.isDown) vx += 1;
     if (this.keys.up.isDown || this.cursors.up.isDown) vy -= 1;
     if (this.keys.down.isDown || this.cursors.down.isDown) vy += 1;
-    // 조이스틱 (활성 시 우선)
     if (this.stick.isActive()) {
       vx = this.stick.vecX;
       vy = this.stick.vecY;
     }
-    if (this.controlled && this.controlled.alive) {
-      this.controlled.setMoveInput(vx, vy);
-    }
-
-    // 스페이스 스킬 (영웅 조작 중에만)
-    if (Phaser.Input.Keyboard.JustDown(this.keys.space)) {
-      this.requestSkill();
-    }
-  }
-
-  private updateStrongholds(time: number, delta: number) {
-    this.captureInfo = null;
-    for (const s of this.strongholds) {
-      if (s.owner === 'ally') {
-        // 아군 거점: (스코프상) 적에게 점령당하지 않음. 리셋만.
-        s.captureProgress = 0;
-        continue;
-      }
-
-      // 적 거점: 반경 내 수비대 수 & 아군 수 계산
-      let enemiesInside = 0;
-      for (const e of this.enemies) {
-        if (s.contains(e.x, e.y)) enemiesInside++;
-      }
-      let alliesInside = 0;
-      if (this.hero.alive && s.contains(this.hero.x, this.hero.y)) alliesInside++;
-      for (const a of this.allies) {
-        if (s.contains(a.x, a.y)) alliesInside++;
-      }
-
-      // 점령 진행: 수비 전멸 + 아군 존재
-      if (enemiesInside === 0 && alliesInside > 0) {
-        s.captureProgress += delta / STRONGHOLD.captureTime;
-        if (s.captureProgress >= 1) {
-          this.captureStronghold(s);
-        } else {
-          this.captureInfo = { name: s.name, progress: s.captureProgress };
-        }
-      } else {
-        // 되돌림
-        s.captureProgress = Math.max(0, s.captureProgress - (delta / STRONGHOLD.captureTime) * 0.5);
-      }
-
-      // 수비대 리스폰
-      if (time > s.nextGarrison && enemiesInside < STRONGHOLD.garrisonMax) {
-        s.nextGarrison = time + STRONGHOLD.garrisonRespawn;
-        const a = Math.random() * Math.PI * 2;
-        const r = 40 + Math.random() * 60;
-        this.spawnMonster(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r, Math.random() < 0.8 ? 'goblin' : 'oni');
-      }
-
-      // 습격대 파견
-      if (time > s.nextRaid) {
-        s.nextRaid = time + STRONGHOLD.raidInterval + Math.random() * 6000;
-        this.launchRaid(s);
-      }
-    }
-  }
-
-  private captureStronghold(s: Stronghold) {
-    s.setOwner('ally');
-    // 증원 스폰
-    for (let i = 0; i < STRONGHOLD.captureReinforce; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 30 + Math.random() * 60;
-      this.spawnSoldier(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r, Math.random() < 0.6 ? 'melee' : 'ranged');
-    }
-    // 점령 플래시
-    this.cameras.main.flash(200, 80, 140, 255);
-  }
-
-  private launchRaid(from: Stronghold) {
-    // 가장 가까운 아군 거점 방향으로 소규모 습격대
-    const allyStrongholds = this.strongholds.filter((s) => s.owner === 'ally');
-    if (allyStrongholds.length === 0) return;
-    let target = allyStrongholds[0];
-    let bd = Infinity;
-    for (const t of allyStrongholds) {
-      const d = Phaser.Math.Distance.Between(from.x, from.y, t.x, t.y);
-      if (d < bd) {
-        bd = d;
-        target = t;
-      }
-    }
-    const n = STRONGHOLD.raidMin + Math.floor(Math.random() * (STRONGHOLD.raidMax - STRONGHOLD.raidMin + 1));
-    for (let i = 0; i < n; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = 30 + Math.random() * 50;
-      const m = this.spawnMonster(from.x + Math.cos(a) * r, from.y + Math.sin(a) * r, Math.random() < 0.85 ? 'goblin' : 'oni', true);
-      if (m) m.setRaidTarget(target.x + (Math.random() - 0.5) * 120, target.y + (Math.random() - 0.5) * 120);
-    }
+    if (this.controlled && this.controlled.alive) this.controlled.setMoveInput(vx, vy);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.space)) this.requestSkill();
   }
 
   private checkGameEnd() {
-    if (!this.hero.alive) {
-      this.gameState = 'lose';
-      return;
-    }
-    const counts = this.getStrongholdCounts();
-    if (counts.ally >= counts.total) {
-      this.gameState = 'win';
-    }
+    if (this.gameState !== 'playing') return;
+    let ended: GameState | null = null;
+    if (!this.hero.alive) ended = 'lose';
+    else if (this.enemies.length === 0) ended = 'win';
+    else if (this.allies.length <= Math.ceil(this.allyStart * OUTCOME.routRatio)) ended = 'lose';
+    if (!ended) return;
+    this.gameState = ended;
+    this.result = {
+      win: ended === 'win',
+      allyDead: this.allyDead,
+      enemyDead: this.enemyDead,
+      heroKills: this.hero ? this.hero.kills : 0,
+      playerKills: this.playerKills
+    };
+    this.cameras.main.stopFollow();
+  }
+
+  private installDebug() {
+    (window as any).__debug = {
+      state: () => this.gameState,
+      allyCount: () => this.allies.length,
+      enemyCount: () => this.enemies.length,
+      totalCount: () => this.allies.length + this.enemies.length,
+      fps: () => Math.round((this.game.loop as any).actualFps),
+      combatActive: () => this.time.now - this.battleStartTime >= FORMATION.marchStartDelay,
+      allyFrontX: () => this.allies.reduce((m, a) => (a.alive ? Math.max(m, a.x) : m), -Infinity),
+      enemyFrontX: () => this.enemies.reduce((m, e) => (e.alive ? Math.min(m, e.x) : m), Infinity),
+      frontGap: () => {
+        const af = this.allies.reduce((m, a) => (a.alive ? Math.max(m, a.x) : m), -Infinity);
+        const ef = this.enemies.reduce((m, e) => (e.alive ? Math.min(m, e.x) : m), Infinity);
+        return ef - af;
+      },
+      controlledUid: () => (this.controlled ? this.controlled.uid : -1),
+      controllingHero: () => this.controlled === this.hero,
+      controlledPos: () =>
+        this.controlled && this.controlled.alive ? { x: this.controlled.x, y: this.controlled.y } : null,
+      infoLabel: () => (this.getInfoUnit() ? this.getInfoUnit()!.label : null),
+      selectAlly: (i: number) => {
+        const u = this.allies[i];
+        if (u && u.alive) {
+          this.selected = u;
+          this.possess(u);
+        }
+        return u ? u.uid : -1;
+      },
+      selectEnemy: (i: number) => {
+        const u = this.enemies[i];
+        if (u && u.alive) this.selected = u;
+        return u ? u.uid : -1;
+      },
+      clickAt: (wx: number, wy: number) => {
+        this.clickAt(wx, wy);
+        return this.getInfoUnit();
+      },
+      result: () => this.result
+    };
   }
 }
