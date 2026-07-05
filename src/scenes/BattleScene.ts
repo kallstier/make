@@ -1,7 +1,6 @@
 import Phaser from 'phaser';
 import {
   WORLD,
-  GAME,
   HERO,
   AI,
   TAP,
@@ -138,6 +137,10 @@ export class BattleScene extends Phaser.Scene {
   private frameCount = 0;
   private gameState: GameState = 'playing';
   private battleStartTime = 0;
+
+  // 카메라 기본 줌 (좁은 화면일수록 낮춰 난전 시야 확보) + 추적 시작 여부
+  private baseZoom = 1;
+  private followStarted = false;
 
   private allyGrid = new Map<number, Unit[]>();
   private enemyGrid = new Map<number, Unit[]>();
@@ -361,21 +364,43 @@ export class BattleScene extends Phaser.Scene {
     this.input.on('pointerdown', this.onPointerDown, this);
     this.input.on('pointerup', this.onPointerUp, this);
 
-    // 카메라 개전 연출: 전장 전체 줌아웃 → 줌인 추적
-    const fit = Math.min(GAME.width / WORLD.width, GAME.height / WORLD.height);
+    // 카메라 개전 연출: 전장 전체 줌아웃(실제 뷰포트 기준) → 기본 줌으로 줌인 추적
+    this.baseZoom = this.computeBaseZoom();
+    const fit = Math.min(this.scale.width / WORLD.width, this.scale.height / WORLD.height);
     this.cameras.main.setZoom(fit);
     this.cameras.main.centerOn(WORLD.width / 2, WORLD.height / 2);
     this.time.delayedCall(150, () => {
       this.tweens.add({
         targets: this.cameras.main,
-        zoom: 1,
+        zoom: this.baseZoom,
         duration: 1500,
         ease: 'Cubic.InOut',
-        onComplete: () => this.cameras.main.startFollow(this.controlled, true, 0.08, 0.08)
+        onComplete: () => {
+          this.followStarted = true;
+          this.cameras.main.startFollow(this.controlled, true, 0.08, 0.08);
+        }
       });
     });
 
+    // 뷰포트 변화 대응: 좁은 화면 기본 줌 재계산 (추적 시작 후에만 즉시 반영)
+    this.followStarted = false;
+    this.scale.on('resize', this.onResize, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.scale.off('resize', this.onResize, this));
+
     this.installDebug();
+  }
+
+  // 좁은 화면(폰/세로)에서는 기본 줌을 낮춰 밀집 난전이 더 넓게 보이게 한다
+  private computeBaseZoom(): number {
+    return this.scale.width < 700 ? 0.8 : 1;
+  }
+
+  private onResize() {
+    this.baseZoom = this.computeBaseZoom();
+    // 개전 줌아웃 연출 도중에는 건드리지 않음(트윈이 baseZoom까지 진행). 추적 시작 후에만 즉시 반영.
+    if (this.followStarted && this.gameState === 'playing') {
+      this.cameras.main.setZoom(this.baseZoom);
+    }
   }
 
   // ---------- 스폰 (전략층 BattleSetup 기반) ----------

@@ -187,7 +187,34 @@ export class UIScene extends Phaser.Scene {
       .setVisible(false);
     this.battle.events.on('bossKilled', this.showBossBanner, this);
 
-    this.scale.on('resize', () => this.layout());
+    this.scale.on('resize', this.layout, this);
+    // 씬 종료 시 리스너 해제 (중복 등록 방지 — UIScene은 전투마다 재생성됨)
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.scale.off('resize', this.layout, this);
+      this.battle.events.off('bossKilled', this.showBossBanner, this);
+    });
+
+    // 검증용 UI 지오메트리 훅
+    (window as any).__uidbg = {
+      viewW: () => this.scale.width,
+      viewH: () => this.scale.height,
+      // 하단 정보창: 상단 y / 높이 / 좌측 x / 폭 (min(viewW,1280) 중앙)
+      infoPanel: () => {
+        const w = Math.min(this.scale.width, 1280);
+        return {
+          top: this.barY,
+          height: this.barH,
+          x: Math.round((this.scale.width - w) / 2),
+          w
+        };
+      },
+      // 부대 명령 패널 표시 여부 + 표시된 탭 수
+      squadPanel: () => ({
+        visible: this.squadPanelG.visible,
+        tabs: this.tabTexts.filter((t) => t.text !== '').length
+      }),
+      skill: () => ({ x: this.skillCx, y: this.skillCy })
+    };
   }
 
   // ---------- 부대 명령 패널 ----------
@@ -369,19 +396,23 @@ export class UIScene extends Phaser.Scene {
   }
 
   private drawInfoPanel() {
-    const w = this.scale.width;
+    const vw = this.scale.width;
     const y = this.barY;
+    // 정보창 폭 = min(viewW, 1280), 화면 하단 중앙 밀착
+    const w = Math.min(vw, 1280);
+    const ox = Math.round((vw - w) / 2);
+    const narrow = w < 700; // 좁은 화면: 장비는 아이콘만, 부가 정보 생략
     const info = this.battle.getInfoUnit();
 
     this.infoPanel.clear();
     this.infoPanel.fillStyle(0x0a1020, 0.85);
-    this.infoPanel.fillRect(0, y, w, this.barH);
+    this.infoPanel.fillRect(ox, y, w, this.barH);
     this.infoPanel.lineStyle(2, 0x3a4a6a, 0.9);
-    this.infoPanel.lineBetween(0, y, w, y);
+    this.infoPanel.lineBetween(ox, y, ox + w, y);
     // 1단/2단 구분선
     const rowSplit = y + 82;
     this.infoPanel.lineStyle(1, 0x2a3a5a, 0.7);
-    this.infoPanel.lineBetween(10, rowSplit, w - 10, rowSplit);
+    this.infoPanel.lineBetween(ox + 10, rowSplit, ox + w - 10, rowSplit);
 
     this.faceFrame.clear();
     if (!info) {
@@ -393,7 +424,7 @@ export class UIScene extends Phaser.Scene {
     const accent = info.isBoss ? 0xff3020 : isEnemy ? 0xd23b3b : info.possessed ? 0xffd23b : 0x3b8ef0;
 
     // 얼굴 아이콘 박스 (1단 높이)
-    const boxX = 12;
+    const boxX = ox + 12;
     const boxY = y + 8;
     const boxS = 66;
     this.faceFrame.fillStyle(0x000000, 0.5);
@@ -476,33 +507,43 @@ export class UIScene extends Phaser.Scene {
     this.infoMpText.setPosition(hbx + hbw + 8, mby - 3);
     this.infoMpText.setText(`MP ${info.mp}/${info.maxMp}`);
 
-    // 처치 · EXP
-    const expStr = info.expNext === Infinity ? 'MAX' : `${info.exp}/${info.expNext}`;
-    this.killExpText.setPosition(tx + 330, y + 8);
-    this.killExpText.setText(`처치 ${info.kills}    EXP ${expStr}`);
-
-    // 무기 proc 스킬 설명 한 줄 (있을 때만)
-    this.procDescText.setPosition(tx + 330, y + 30);
-    this.procDescText.setText(info.procDesc ?? '');
+    // 처치 · EXP / proc 설명: 우측 여유가 있을 때만 (좁은 화면에서는 생략)
+    const sideX = tx + 330;
+    const showSide = !narrow && sideX + 120 <= ox + w;
+    if (showSide) {
+      const expStr = info.expNext === Infinity ? 'MAX' : `${info.exp}/${info.expNext}`;
+      this.killExpText.setPosition(sideX, y + 8);
+      this.killExpText.setText(`처치 ${info.kills}    EXP ${expStr}`);
+      this.procDescText.setPosition(sideX, y + 30);
+      this.procDescText.setText(info.procDesc ?? '');
+    } else {
+      this.killExpText.setText('');
+      this.procDescText.setText('');
+    }
 
     // ---- 2단: 장비 6슬롯 ----
+    // 좁은 화면(narrow)에서는 아이콘만 표시(이름 생략)해 겹침 방지
     const rowY = rowSplit + 4;
     const cellW = (w - 24) / 6;
     for (let i = 0; i < 6; i++) {
       const e = info.equip[i];
-      const cx = 12 + cellW * i;
+      const cx = ox + 12 + cellW * i;
       const ic = this.equipIcons[i];
       const nm = this.equipNames[i];
       // 아이콘
       ic.setVisible(true);
       ic.setTexture(e.iconKey);
       ic.setAlpha(e.filled ? 1 : 0.3);
-      ic.setPosition(cx + 14, rowY + 15);
+      ic.setPosition(narrow ? cx + cellW / 2 : cx + 14, rowY + 15);
       // 이름 (비면 회색 '-')
-      nm.setPosition(cx + 30, rowY + 2);
-      nm.setText(`${e.slotName}\n${e.name}`);
-      nm.setColor(!e.filled ? '#6a7488' : e.highlight ? '#ff9a4a' : '#c8d4e8');
-      nm.setFontStyle(e.highlight ? 'bold' : 'normal');
+      if (narrow) {
+        nm.setText('');
+      } else {
+        nm.setPosition(cx + 30, rowY + 2);
+        nm.setText(`${e.slotName}\n${e.name}`);
+        nm.setColor(!e.filled ? '#6a7488' : e.highlight ? '#ff9a4a' : '#c8d4e8');
+        nm.setFontStyle(e.highlight ? 'bold' : 'normal');
+      }
     }
   }
 
@@ -541,6 +582,7 @@ export class UIScene extends Phaser.Scene {
       lose: { text: '패배...', color: '#ff6b6b' },
       escape: { text: '탈출', color: '#7ad0ff' }
     };
+    const popW = Math.min(520, w - 32); // 팝업 콘텐츠 폭
     const ti = titleInfo[state];
     const title = this.add.text(w / 2, h * 0.24, ti.text, {
       fontFamily: 'sans-serif',
@@ -558,7 +600,9 @@ export class UIScene extends Phaser.Scene {
       const sub = this.add.text(w / 2, h * 0.34, '부대가 전장을 이탈했습니다 — 다음 거점으로 귀환', {
         fontFamily: 'sans-serif',
         fontSize: '18px',
-        color: '#bcd8ea'
+        color: '#bcd8ea',
+        align: 'center',
+        wordWrap: { width: popW }
       });
       sub.setOrigin(0.5);
       cont.add(sub);
@@ -577,7 +621,8 @@ export class UIScene extends Phaser.Scene {
       fontFamily: 'monospace',
       fontSize: '18px',
       color: '#e6eefb',
-      align: 'center'
+      align: 'center',
+      wordWrap: { width: popW }
     });
     stat.setOrigin(0.5);
     cont.add(stat);

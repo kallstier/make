@@ -45,14 +45,20 @@ export class StrategyScene extends Phaser.Scene {
   private popupOpen = false;
 
   // UI (scrollFactor 0)
+  private turnBar!: Phaser.GameObjects.Graphics;
   private turnText!: Phaser.GameObjects.Text;
   private hintText!: Phaser.GameObjects.Text;
   private endBtn!: Phaser.GameObjects.Graphics;
   private endBtnText!: Phaser.GameObjects.Text;
+  private endZone!: Phaser.GameObjects.Zone;
   private squadCard!: Phaser.GameObjects.Container;
   private nodeCard!: Phaser.GameObjects.Container;
   private popup!: Phaser.GameObjects.Container;
   private endScreen!: Phaser.GameObjects.Container;
+
+  // 카메라 fit 상태
+  private minZoom = 0.4;
+  private userZoomed = false; // 사용자가 핀치/휠로 줌을 조정했는지 (리사이즈 시 재-fit 여부 판단)
 
   constructor() {
     super('StrategyScene');
@@ -113,8 +119,13 @@ export class StrategyScene extends Phaser.Scene {
     this.setupCamera();
     this.setupInput();
     this.buildUI();
+    this.layout();
     this.redrawOverlay();
     this.installDebug();
+
+    // 뷰포트 변화(회전/창 크기) 대응: 카메라 재-fit + UI 재배치
+    this.scale.on('resize', this.onResize, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.scale.off('resize', this.onResize, this));
 
     // 게임 종료/승리 → 결과 화면. 아니면 대기 중인 공격(순차 전투) 재개.
     if (st.gameOver || st.victory) {
@@ -125,20 +136,58 @@ export class StrategyScene extends Phaser.Scene {
   }
 
   // ---------- 카메라 ----------
+  // 지도 전체(1300x1050)가 뷰포트에 들어오는 줌 = fit. 최소 줌 = fit, 최대 = 2.5.
+  private computeFit(): number {
+    return Math.min(this.scale.width / STRAT_W, this.scale.height / STRAT_H);
+  }
+
   private setupCamera() {
     const cam = this.cameras.main;
-    cam.setBounds(0, 0, STRAT_W, STRAT_H);
-    cam.setBackgroundColor('#16324a');
-    const fit = Math.min(this.scale.width / STRAT_W, this.scale.height / STRAT_H);
-    cam.setZoom(Phaser.Math.Clamp(fit * 1.05, 0.4, 2.2));
-    const hanyang = getNode('hanyang');
-    if (hanyang) cam.centerOn(hanyang.x, hanyang.y);
+    // Phaser 기본 바운즈는 지도<뷰포트 축을 상단에 고정(센터링 안 됨) → 직접 스크롤 관리
+    cam.useBounds = false;
+    cam.setBackgroundColor('#1f4a67'); // 남는 여백은 바다 톤으로 (순수 남색 공백 방지)
+    this.userZoomed = false;
+    this.fitCamera(true);
+  }
+
+  // 카메라를 지도에 맞춤. initial=true 또는 사용자가 줌을 건드리지 않았으면 fit,
+  // 사용자가 줌 중이면 새 fit 범위로 클램프만. 이후 항상 clampOrCenter로 위치 정리.
+  private fitCamera(initial: boolean) {
+    const cam = this.cameras.main;
+    const fit = this.computeFit();
+    this.minZoom = fit;
+    if (initial || !this.userZoomed) {
+      cam.setZoom(fit);
+    } else {
+      cam.setZoom(Phaser.Math.Clamp(cam.zoom, this.minZoom, 2.5));
+    }
+    this.clampOrCenter();
+  }
+
+  // 축별로: 지도가 뷰포트보다 작으면(전부 보임) 중앙 정렬, 크면(줌인) 지도 밖으로 못 나가게 클램프.
+  // Phaser는 카메라 중심 기준으로 줌하므로 midPoint(= scroll + viewport/2, 월드 좌표) 기준으로 계산한다.
+  private clampOrCenter() {
+    const cam = this.cameras.main;
+    const halfW = this.scale.width / 2;
+    const halfH = this.scale.height / 2;
+    const dispW = this.scale.width / cam.zoom; // 화면에 보이는 월드 폭
+    const dispH = this.scale.height / cam.zoom;
+    // 보고자 하는 월드 중심 좌표 (지도 전부 보이면 지도 중앙, 아니면 지도 안으로 클램프)
+    const cx = STRAT_W <= dispW ? STRAT_W / 2 : Phaser.Math.Clamp(cam.scrollX + halfW, dispW / 2, STRAT_W - dispW / 2);
+    const cy = STRAT_H <= dispH ? STRAT_H / 2 : Phaser.Math.Clamp(cam.scrollY + halfH, dispH / 2, STRAT_H - dispH / 2);
+    cam.scrollX = cx - halfW;
+    cam.scrollY = cy - halfH;
   }
 
   private setZoom(z: number) {
-    const cam = this.cameras.main;
-    const fit = Math.min(this.scale.width / STRAT_W, this.scale.height / STRAT_H);
-    cam.setZoom(Phaser.Math.Clamp(z, fit * 0.8, 2.4));
+    this.userZoomed = true;
+    this.cameras.main.setZoom(Phaser.Math.Clamp(z, this.minZoom, 2.5));
+    this.clampOrCenter();
+  }
+
+  private onResize() {
+    this.fitCamera(false);
+    this.layout();
   }
 
   // ---------- 입력 ----------
@@ -167,6 +216,7 @@ export class StrategyScene extends Phaser.Scene {
       const cam = this.cameras.main;
       cam.scrollX -= dx / cam.zoom;
       cam.scrollY -= dy / cam.zoom;
+      this.clampOrCenter(); // 지도 밖으로 못 나가게 (전부 보이는 축은 중앙 고정)
     });
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
       this.lastPinch = 0;
@@ -392,26 +442,31 @@ export class StrategyScene extends Phaser.Scene {
     g.fillPath();
   }
 
-  // ---------- UI ----------
-  private buildUI() {
-    const w = this.scale.width;
+  // 안전 여백 (모바일 노치 고려)
+  private readonly PAD = 12;
+  private readonly END_W = 150;
+  private readonly END_H = 56;
 
-    // 상단: 턴 카운터
-    const bar = this.add.graphics().setScrollFactor(0).setDepth(100);
-    bar.fillStyle(0x0a1424, 0.8);
-    bar.fillRoundedRect(10, 8, 220, 46, 8);
+  // ---------- UI ----------
+  // 객체 생성만 담당. 실제 좌표 배치는 layout()이 (생성 시/리사이즈 시 동일하게) 수행.
+  private buildUI() {
+    // 상단: 턴 카운터 (좌상 앵커)
+    this.turnBar = this.add.graphics().setScrollFactor(0).setDepth(100);
     this.turnText = this.add
-      .text(22, 16, '', { fontFamily: 'sans-serif', fontSize: '20px', fontStyle: 'bold', color: '#ffe066' })
+      .text(0, 0, '', { fontFamily: 'sans-serif', fontSize: '20px', fontStyle: 'bold', color: '#ffe066' })
       .setScrollFactor(0)
       .setDepth(101);
+
+    // 하단 중앙: 안내 문구 (좁은 화면에서는 layout에서 숨김)
     this.hintText = this.add
-      .text(22, this.scale.height - 30, '부대를 탭해 선택 → 인접 거점 탭으로 이동 예약 → 턴 종료', {
+      .text(0, 0, '부대를 탭해 선택 → 인접 거점 탭으로 이동 예약 → 턴 종료', {
         fontFamily: 'sans-serif',
         fontSize: '13px',
         color: '#cfe0f0',
         stroke: '#000000',
         strokeThickness: 3
       })
+      .setOrigin(0.5, 1)
       .setScrollFactor(0)
       .setDepth(101);
 
@@ -422,17 +477,12 @@ export class StrategyScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(101);
-    const bw = 150;
-    const bh = 56;
-    const bx = w - bw / 2 - 20;
-    const by = this.scale.height - bh / 2 - 20;
-    this.endBtn.fillStyle(0x2f6ad0, 1);
-    this.endBtn.fillRoundedRect(bx - bw / 2, by - bh / 2, bw, bh, 12);
-    this.endBtn.lineStyle(3, 0xffffff, 0.85);
-    this.endBtn.strokeRoundedRect(bx - bw / 2, by - bh / 2, bw, bh, 12);
-    this.endBtnText.setPosition(bx, by);
-    const zone = this.add.zone(bx, by, bw, bh).setScrollFactor(0).setDepth(102).setInteractive({ useHandCursor: true });
-    zone.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
+    this.endZone = this.add
+      .zone(0, 0, this.END_W, this.END_H)
+      .setScrollFactor(0)
+      .setDepth(102)
+      .setInteractive({ useHandCursor: true });
+    this.endZone.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
       e.stopPropagation();
       this.uiConsumed = true;
       this.endTurnHuman();
@@ -445,6 +495,52 @@ export class StrategyScene extends Phaser.Scene {
     this.endScreen = this.add.container(0, 0).setScrollFactor(0).setDepth(160).setVisible(false);
 
     this.updateTurnText();
+  }
+
+  // 뷰포트(this.scale.width/height) 기준으로 모든 고정 UI를 앵커링. 생성/리사이즈 공용.
+  private layout() {
+    const w = this.scale.width;
+    const h = this.scale.height;
+    const pad = this.PAD;
+
+    // 턴 카운터: 좌상 (반투명 배경 유지 — 지도 라벨 위에 떠도 가독)
+    this.turnBar.clear();
+    this.turnBar.fillStyle(0x0a1424, 0.8);
+    this.turnBar.fillRoundedRect(pad, pad, 220, 46, 8);
+    this.turnText.setPosition(pad + 12, pad + 8);
+
+    // 턴 종료: 우하단 고정
+    const bw = this.END_W;
+    const bh = this.END_H;
+    const bx = w - bw / 2 - pad;
+    const by = h - bh / 2 - pad;
+    this.endBtn.clear();
+    this.endBtn.fillStyle(0x2f6ad0, 1);
+    this.endBtn.fillRoundedRect(bx - bw / 2, by - bh / 2, bw, bh, 12);
+    this.endBtn.lineStyle(3, 0xffffff, 0.85);
+    this.endBtn.strokeRoundedRect(bx - bw / 2, by - bh / 2, bw, bh, 12);
+    this.endBtnText.setPosition(bx, by);
+    this.endZone.setPosition(bx, by);
+
+    // 안내 문구: 하단 중앙. 카드/버튼과 겹칠 좁은 화면에서는 숨김.
+    this.hintText.setPosition(w / 2, h - pad);
+    this.hintText.setVisible(w >= 820);
+
+    // 표시 중인 정보 카드 재배치
+    this.layoutCards();
+  }
+
+  private layoutCards() {
+    const h = this.scale.height;
+    for (const card of [this.squadCard, this.nodeCard]) {
+      if (!card.visible) continue;
+      const ch = (card.getData('ch') as number) ?? 96;
+      card.setPosition(this.PAD, h - ch - (this.END_H + this.PAD * 2));
+    }
+  }
+
+  private cardWidth(): number {
+    return Math.min(360, this.scale.width - 24);
   }
 
   private updateTurnText() {
@@ -472,11 +568,9 @@ export class StrategyScene extends Phaser.Scene {
     if (!sq) return;
     this.nodeCard.setVisible(false);
     this.squadCard.removeAll(true);
-    const cw = 250;
+    const cw = this.cardWidth();
     const ch = 96;
-    const cx = 14;
-    const cy = this.scale.height - ch - 60;
-    this.squadCard.setPosition(cx, cy);
+    this.squadCard.setData('ch', ch);
     this.squadCard.add(this.cardBg(cw, ch));
     const node = getNode(sq.location);
     const lines = [
@@ -498,16 +592,15 @@ export class StrategyScene extends Phaser.Scene {
     dot.fillRect(cw - 26, 12, 14, 14);
     this.squadCard.add(dot);
     this.squadCard.setVisible(true);
+    this.layoutCards();
   }
 
   private showNodeCard(node: NodeState) {
     this.squadCard.setVisible(false);
     this.nodeCard.removeAll(true);
-    const cw = 260;
+    const cw = this.cardWidth();
     const ch = 92;
-    const cx = 14;
-    const cy = this.scale.height - ch - 60;
-    this.nodeCard.setPosition(cx, cy);
+    this.nodeCard.setData('ch', ch);
     this.nodeCard.add(this.cardBg(cw, ch));
     const ownerStr = node.owner === 'ally' ? '아군 점령' : '적 점유';
     const def = node.owner === 'ally' ? (garrisonTotal(node) === 0 ? '아군 영토' : '') : garrisonEstimate(node);
@@ -521,6 +614,7 @@ export class StrategyScene extends Phaser.Scene {
       })
     );
     this.nodeCard.setVisible(true);
+    this.layoutCards();
   }
 
   // ---------- 턴 종료 ----------
@@ -722,12 +816,39 @@ export class StrategyScene extends Phaser.Scene {
       scene: () => 'strategy',
       // 전체 지도가 보이도록 카메라 맞춤 (스크린샷/개요용)
       fitMap: () => {
-        const cam = this.cameras.main;
-        const fit = Math.min(this.scale.width / STRAT_W, this.scale.height / STRAT_H);
-        cam.setZoom(fit * 0.98);
-        cam.centerOn(STRAT_W / 2, STRAT_H / 2);
-        return cam.zoom;
+        this.userZoomed = false;
+        this.fitCamera(true);
+        return this.cameras.main.zoom;
       },
+      // 검증용: 카메라/뷰포트 상태
+      camInfo: () => {
+        const cam = this.cameras.main;
+        return {
+          zoom: cam.zoom,
+          minZoom: this.minZoom,
+          scrollX: cam.scrollX,
+          scrollY: cam.scrollY,
+          viewW: this.scale.width,
+          viewH: this.scale.height,
+          worldW: STRAT_W,
+          worldH: STRAT_H
+        };
+      },
+      // 검증용: 노드의 화면(스크린) 좌표 — 전부 뷰포트 안에 있는지 확인
+      // Phaser 실제 렌더와 일치하도록 worldView(보이는 월드 사각형) 기준으로 투영한다.
+      nodeScreenPoints: () => {
+        const cam = this.cameras.main;
+        const wv = cam.worldView;
+        const out: Record<string, { x: number; y: number }> = {};
+        for (const n of getState().nodes) {
+          const sx = (n.x - wv.x) * cam.zoom;
+          const sy = (n.y - wv.y) * cam.zoom;
+          out[n.id] = { x: Math.round(sx), y: Math.round(sy) };
+        }
+        return out;
+      },
+      // 검증용: 턴 종료 버튼 중심 (스크린 좌표, scrollFactor 0)
+      endBtnCenter: () => ({ x: this.endZone.x, y: this.endZone.y }),
       turn: () => getState().turn,
       nodeOwners: () => {
         const o: Record<string, string> = {};
