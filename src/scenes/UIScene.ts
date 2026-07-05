@@ -592,7 +592,8 @@ export class UIScene extends Phaser.Scene {
     btn.lineStyle(3, 0xffffff, 0.85);
     btn.strokeRoundedRect(bx - bw / 2, by - bh / 2, bw, bh, 12);
     cont.add(btn);
-    const btnText = this.add.text(bx, by, '다시 싸우기', {
+    const btnLabel = this.battle.isFromStrategy() ? '전략맵으로' : '다시 싸우기';
+    const btnText = this.add.text(bx, by, btnLabel, {
       fontFamily: 'sans-serif',
       fontSize: '26px',
       fontStyle: 'bold',

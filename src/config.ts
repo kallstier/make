@@ -103,6 +103,16 @@ export const MONSTER = {
     attackCooldown: 780,
     knockback: 3
   },
+  // 산적 (인간형, 도끼) — 고블린보다 단단하고 한 방이 무거움
+  bandit: {
+    hp: 64,
+    speed: 84,
+    detectRange: 300,
+    attackRange: 32,
+    attackDamage: 16,
+    attackCooldown: 840,
+    knockback: 4
+  },
   goblinArcher: {
     hp: 38,
     speed: 86,
@@ -153,6 +163,7 @@ export type UnitType =
   | 'spear'
   | 'goblin'
   | 'goblinArcher'
+  | 'bandit'
   | 'oni'
   | 'goblinKing'
   | 'oniLord';
@@ -170,6 +181,7 @@ export const CLASS_NAME: Record<UnitType, string> = {
   spear: '창병',
   goblin: '고블린',
   goblinArcher: '고블린 궁수',
+  bandit: '산적',
   oni: '오니',
   goblinKing: '고블린 킹',
   oniLord: '오니 대장'
@@ -192,6 +204,7 @@ export const CLASS_STATS: Record<UnitType, StatBase> = {
   spear: { hp: 68, mp: 10, atk: 13, def: 2, speed: 82 },
   goblin: { hp: 50, mp: 0, atk: 14, def: 1, speed: 90 },
   goblinArcher: { hp: 36, mp: 0, atk: 12, def: 0, speed: 86 },
+  bandit: { hp: 66, mp: 0, atk: 17, def: 2, speed: 84 },
   oni: { hp: 185, mp: 0, atk: 24, def: 3, speed: 66 },
   goblinKing: { hp: 430, mp: 0, atk: 30, def: 5, speed: 70 },
   oniLord: { hp: 540, mp: 0, atk: 36, def: 7, speed: 58 }
@@ -205,6 +218,7 @@ export const LEVEL_GROWTH: Record<UnitType, StatBase> = {
   spear: { hp: 9, mp: 2, atk: 2, def: 1, speed: 0 },
   goblin: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
   goblinArcher: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
+  bandit: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
   oni: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
   goblinKing: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
   oniLord: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 }
@@ -222,6 +236,7 @@ export const EXP_REWARD: Record<UnitType, number> = {
   spear: 5,
   goblin: 8,
   goblinArcher: 8,
+  bandit: 12,
   oni: 20,
   goblinKing: 120,
   oniLord: 160

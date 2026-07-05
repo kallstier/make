@@ -27,9 +27,16 @@ import { Monster, MonsterKind } from '../units/Monster';
 import { Projectile } from '../units/Projectile';
 import { genBattlefield } from '../world/MapGen';
 import { FloatingStick } from '../input/FloatingStick';
-import { FRAME } from '../gen/spriteGen';
+import { FRAME, genUnit, genBanner, UnitKind } from '../gen/spriteGen';
 import { EQUIP_SLOTS, SLOT_ICON, SLOT_NAME, itemProc, EquipSlot } from '../rpg/items';
 import { expForNext } from '../rpg/stats';
+import {
+  BattleSetup,
+  BattleSquadInput,
+  BattleUnitInput,
+  BattleSurvivor,
+  applyBattleResult
+} from '../state/GameState';
 
 export type GameState = 'playing' | 'win' | 'lose' | 'escape';
 
@@ -45,8 +52,17 @@ export interface InfoEquipSlot {
   highlight: boolean;
 }
 
+// 전투 내부에서 쓰는 최소 부대 정의 (편성 데이터는 전략층 BattleSetup 에서 공급)
+interface BattleSquadDef {
+  id: number;
+  name: string;
+  faction: Faction;
+  tint: number;
+  banner: number;
+}
+
 interface SquadRuntime {
-  def: SquadDef;
+  def: BattleSquadDef;
   members: Unit[];
   banner: Phaser.GameObjects.Image;
   order: SquadOrder;
@@ -55,16 +71,8 @@ interface SquadRuntime {
   bossDead: boolean; // 이 무리의 보스가 죽었는지 (투항 확률 상승)
 }
 
-// 탈출/생존 기록 (다음 라운드 전략층이 소비할 데이터)
-export interface Survivor {
-  label: string;
-  unitType: UnitType;
-  level: number;
-  squadId: number;
-}
-
 interface Spawn {
-  type: UnitType;
+  input: BattleUnitInput;
   squadId: number;
   x: number;
   y: number;
@@ -78,13 +86,18 @@ export interface BattleResult {
   heroKills: number;
   playerKills: number;
   surrenderedGained: number; // 투항 영입 수
-  escapees: Survivor[]; // 탈출 생존자 (다음 라운드 "귀환"에 사용)
-  // 부대별 생존 요약 (전략층으로 이월)
+  escapees: BattleSurvivor[]; // 탈출 생존자 (귀환에 사용)
+  heroDied: boolean; // 영웅 전사 (게임 오버 판정)
+  survivorUnits: BattleSurvivor[]; // 전략층 반영용 생존 유닛 (win=잔존, escape=탈출)
+  enemyRemaining: { unitType: UnitType }[]; // 수비대 잔존 (미점령 시 감소분 반영)
+  // 부대별 생존 요약 (UI/이월)
   squadSurvivors: { squadId: number; name: string; alive: number; escaped: number }[];
 }
 
 export class BattleScene extends Phaser.Scene {
-  private hero!: Hero;
+  private hero?: Hero; // 참전 부대에 영웅이 없을 수도 있으므로 옵셔널
+  private setup!: BattleSetup;
+  private fromStrategy = false;
   private allies: Unit[] = [];
   private enemies: Unit[] = [];
   private squads: SquadRuntime[] = [];
@@ -146,7 +159,7 @@ export class BattleScene extends Phaser.Scene {
 
   // 투항/탈출 통계
   private surrenderedGained = 0;
-  private escapees: Survivor[] = [];
+  private escapees: BattleSurvivor[] = [];
   private heroEscaped = false;
 
   // 보스 머리 위 마크 / 투항 백기 (uid → 이미지)
@@ -161,6 +174,52 @@ export class BattleScene extends Phaser.Scene {
 
   constructor() {
     super('BattleScene');
+  }
+
+  // 전략층에서 넘겨준 편성 데이터 수신 (없으면 config SQUADS 기반 단독 전투)
+  init(data: { setup?: BattleSetup }) {
+    this.setup = data && data.setup ? data.setup : this.defaultSetup();
+    this.fromStrategy = !!(data && data.setup && data.setup.fromStrategy);
+  }
+
+  // 단독 실행/폴백용: config SQUADS 를 BattleSetup 으로 변환
+  private defaultSetup(): BattleSetup {
+    const toInput = (def: SquadDef): BattleSquadInput => {
+      const units: BattleUnitInput[] = [];
+      const counts: Record<string, number> = {};
+      for (const c of def.composition) {
+        for (let k = 0; k < c.count; k++) {
+          counts[c.type] = (counts[c.type] ?? 0) + 1;
+          units.push({
+            stateUid: null,
+            unitType: c.type,
+            level: 1,
+            exp: 0,
+            hp: -1,
+            mp: -1,
+            surrendered: false,
+            isHero: c.type === 'hero',
+            label:
+              c.type === 'hero'
+                ? `${def.name} 영웅`
+                : BOSS_TYPES.includes(c.type)
+                ? `【보스】 ${CLASS_NAME[c.type]}`
+                : `${def.name} ${CLASS_NAME[c.type]} #${counts[c.type]}`
+          });
+        }
+      }
+      return { id: def.id, name: def.name, faction: def.faction, tint: def.tint, banner: def.banner, units };
+    };
+    const ally = SQUADS.filter((s) => s.faction === 'ally').map(toInput);
+    const enemy = SQUADS.filter((s) => s.faction === 'enemy').map(toInput);
+    return {
+      fromStrategy: false,
+      targetNodeId: '',
+      nodeName: '',
+      allySquadIds: ally.map((s) => s.id),
+      allySquads: ally,
+      enemySquads: enemy
+    };
   }
 
   create() {
@@ -260,12 +319,13 @@ export class BattleScene extends Phaser.Scene {
     // HP바 배치 렌더용 공용 Graphics
     this.hpGfx = this.add.graphics().setDepth(20);
 
-    // 조작 대상 = 영웅
-    this.controlled = this.hero;
-    this.selected = this.hero;
-    this.hero.playerControlled = true;
+    // 조작 대상 = 영웅 (없으면 아무 아군 유닛)
+    const startCtrl = this.hero ?? this.allies[0];
+    this.controlled = startCtrl;
+    this.selected = startCtrl;
+    startCtrl.playerControlled = true;
 
-    this.selectRing = this.add.image(this.hero.x, this.hero.y, 'selectRing').setDepth(6);
+    this.selectRing = this.add.image(startCtrl.x, startCtrl.y, 'selectRing').setDepth(6);
     this.tweens.add({
       targets: this.selectRing,
       alpha: { from: 0.6, to: 1 },
@@ -318,34 +378,38 @@ export class BattleScene extends Phaser.Scene {
     this.installDebug();
   }
 
-  // ---------- 스폰 ----------
+  // ---------- 스폰 (전략층 BattleSetup 기반) ----------
   private spawnArmies() {
-    const allySquads = SQUADS.filter((s) => s.faction === 'ally');
-    const enemySquads = SQUADS.filter((s) => s.faction === 'enemy');
-    const spawns = [
-      ...this.layoutFaction(allySquads, 'ally'),
-      ...this.layoutFaction(enemySquads, 'enemy')
-    ];
+    const allyInputs = this.setup.allySquads;
+    const enemyInputs = this.setup.enemySquads;
+
+    // 필요한 텍스처(병종 스프라이트 + 배너)를 부대 소속 색조로 지연 생성
+    for (const sq of [...allyInputs, ...enemyInputs]) this.ensureSquadTextures(sq);
 
     // 부대 런타임 준비
-    for (const def of SQUADS) {
-      const banner = this.add.image(0, 0, `banner_${def.id}`).setDepth(14).setVisible(false);
+    for (const sq of [...allyInputs, ...enemyInputs]) {
+      const def: BattleSquadDef = {
+        id: sq.id,
+        name: sq.name,
+        faction: sq.faction,
+        tint: sq.tint,
+        banner: sq.banner
+      };
+      const banner = this.add.image(0, 0, `banner_${sq.id}`).setDepth(14).setVisible(false);
       const orderFlag = this.add.image(0, 0, 'orderFlag').setOrigin(0.5, 1).setDepth(13).setVisible(false);
-      orderFlag.setTint(def.banner);
+      orderFlag.setTint(sq.banner);
       this.squads.push({ def, members: [], banner, order: 'charge', movePoint: null, orderFlag, bossDead: false });
     }
 
-    const labelCount = new Map<string, number>();
+    const spawns = [
+      ...this.layoutFaction(allyInputs, 'ally'),
+      ...this.layoutFaction(enemyInputs, 'enemy')
+    ];
+
     for (const sp of spawns) {
       const u = this.createUnit(sp);
-      const sqName = SQUADS[sp.squadId].name;
-      const key = `${sp.squadId}_${sp.type}`;
-      const idx = (labelCount.get(key) ?? 0) + 1;
-      labelCount.set(key, idx);
-      if (sp.type === 'hero') u.label = `${sqName} 영웅`;
-      else if (BOSS_TYPES.includes(sp.type)) u.label = `【보스】 ${TYPE_NAME[sp.type]}`;
-      else u.label = `${sqName} ${TYPE_NAME[sp.type]} #${idx}`;
-      this.squads[this.squads.findIndex((r) => r.def.id === sp.squadId)].members.push(u);
+      const sr = this.squads.find((r) => r.def.id === sp.squadId);
+      if (sr) sr.members.push(u);
       // 보스 머리 위 마크 (왕관/해골)
       if (u.isBoss) {
         const mark = this.add.image(u.x, u.y, 'bossMark').setDepth(15);
@@ -354,14 +418,25 @@ export class BattleScene extends Phaser.Scene {
     }
   }
 
+  // 부대 소속 색조로 병종 스프라이트 + 배너 텍스처 보장 (이미 있으면 무시)
+  private ensureSquadTextures(sq: BattleSquadInput) {
+    const seen = new Set<string>();
+    for (const u of sq.units) {
+      if (seen.has(u.unitType)) continue;
+      seen.add(u.unitType);
+      genUnit(this, `u_${u.unitType}_${sq.id}`, u.unitType as UnitKind, sq.tint);
+    }
+    genBanner(this, `banner_${sq.id}`, sq.banner);
+  }
+
   private allySquads(): SquadRuntime[] {
     return this.squads.filter((s) => s.def.faction === 'ally');
   }
 
-  private layoutFaction(squads: SquadDef[], faction: Faction): Spawn[] {
+  private layoutFaction(squads: BattleSquadInput[], faction: Faction): Spawn[] {
     const blocks = squads.map((sq) => {
-      const total = sq.composition.reduce((a, c) => a + c.count, 0);
-      const width = Math.ceil(total / FORMATION.cols); // 횡대 폭(유닛 수)
+      const total = sq.units.length;
+      const width = Math.max(1, Math.ceil(total / FORMATION.cols)); // 횡대 폭(유닛 수)
       return { sq, total, width };
     });
     const totalH = blocks.reduce((a, b) => a + b.width * FORMATION.rowSpacing, 0) + (blocks.length - 1) * FORMATION.squadGap;
@@ -371,12 +446,10 @@ export class BattleScene extends Phaser.Scene {
     for (const b of blocks) {
       const blockH = b.width * FORMATION.rowSpacing;
       const centerY = cursorY + blockH / 2;
-      // 유닛 타입 나열 후 근접(front)→원거리(back) 정렬
-      const types: UnitType[] = [];
-      for (const c of b.sq.composition) for (let k = 0; k < c.count; k++) types.push(c.type);
-      types.sort((a, z) => this.roleRank(a) - this.roleRank(z));
+      // 근접(front)→원거리(back) 정렬 (유닛 상태 참조 보존)
+      const units = b.sq.units.slice().sort((a, z) => this.roleRank(a.unitType) - this.roleRank(z.unitType));
 
-      types.forEach((t, i) => {
+      units.forEach((input, i) => {
         const depth = Math.floor(i / b.width); // 0 = 최전선
         const lat = i % b.width;
         const bx =
@@ -386,7 +459,7 @@ export class BattleScene extends Phaser.Scene {
         const by = centerY + (lat - (b.width - 1) / 2) * FORMATION.rowSpacing;
         const jx = (Math.random() - 0.5) * 2 * FORMATION.jitter;
         const jy = (Math.random() - 0.5) * 2 * FORMATION.jitter;
-        spawns.push({ type: t, squadId: b.sq.id, x: bx + jx, y: by + jy });
+        spawns.push({ input, squadId: b.sq.id, x: bx + jx, y: by + jy });
       });
       cursorY += blockH + FORMATION.squadGap;
     }
@@ -398,22 +471,41 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private createUnit(sp: Spawn): Unit {
-    if (sp.type === 'hero') {
+    const t = sp.input.unitType;
+    let u: Unit;
+    if (t === 'hero') {
       this.hero = new Hero(this, sp.x, sp.y, sp.squadId);
       this.allyGroup.add(this.hero);
       this.allies.push(this.hero);
-      return this.hero;
-    }
-    if (sp.type === 'melee' || sp.type === 'ranged' || sp.type === 'spear') {
-      const s = new Soldier(this, sp.x, sp.y, sp.type as SoldierKind, sp.squadId);
+      u = this.hero;
+    } else if (t === 'melee' || t === 'ranged' || t === 'spear') {
+      const s = new Soldier(this, sp.x, sp.y, t as SoldierKind, sp.squadId);
       this.allyGroup.add(s);
       this.allies.push(s);
-      return s;
+      u = s;
+    } else {
+      const m = new Monster(this, sp.x, sp.y, t as MonsterKind, sp.squadId);
+      this.enemyGroup.add(m);
+      this.enemies.push(m);
+      u = m;
     }
-    const m = new Monster(this, sp.x, sp.y, sp.type as MonsterKind, sp.squadId);
-    this.enemyGroup.add(m);
-    this.enemies.push(m);
-    return m;
+    this.applyUnitState(u, sp.input);
+    return u;
+  }
+
+  // 전략층 유닛 상태(레벨/EXP/HP/MP/투항/라벨)를 스폰된 유닛에 반영
+  private applyUnitState(u: Unit, input: BattleUnitInput) {
+    u.stateUid = input.stateUid;
+    u.level = input.level;
+    u.exp = input.exp;
+    u.recomputeStats();
+    u.hp = input.hp >= 0 ? Math.min(input.hp, u.maxHp) : u.maxHp;
+    u.mp = input.mp >= 0 ? Math.min(input.mp, u.maxMp) : u.maxMp;
+    if (input.surrendered) {
+      u.surrendered = true;
+      u.applyConvertTint(SURRENDER.convertTint);
+    }
+    u.label = input.label;
   }
 
   private spawnProjectile(x: number, y: number, target: Unit, damage: number, faction: Faction, speed: number) {
@@ -510,12 +602,12 @@ export class BattleScene extends Phaser.Scene {
     }
 
     // 조작 중이던 유닛 사망 → 영웅 복귀
-    if (unit === this.controlled && unit !== this.hero && this.hero.alive && !this.heroEscaped) {
+    if (unit === this.controlled && unit !== this.hero && this.hero && this.hero.alive && !this.heroEscaped) {
       this.possessHeroFallback();
     }
     // 정보 선택 대상 사망 → 조작 유닛으로 되돌림
     if (unit === this.selected) {
-      this.selected = this.controlled && this.controlled.alive ? this.controlled : this.hero;
+      this.selected = this.controlled && this.controlled.alive ? this.controlled : this.hero ?? this.controlled;
     }
   }
 
@@ -561,6 +653,7 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private possessHeroFallback() {
+    if (!this.hero || !this.hero.alive) return;
     this.controlled = this.hero;
     this.hero.playerControlled = true;
     this.hero.setMoveInput(0, 0);
@@ -675,13 +768,13 @@ export class BattleScene extends Phaser.Scene {
   private escapeUnit(unit: Unit) {
     if (unit.escaped) return;
     unit.escaped = true;
-    this.escapees.push({ label: unit.label, unitType: unit.unitType, level: unit.level, squadId: unit.squadId });
+    this.escapees.push(this.toSurvivor(unit));
     const i = this.allies.findIndex((a) => a.uid === unit.uid);
     if (i >= 0) this.allies.splice(i, 1);
     if (unit === this.hero) this.heroEscaped = true;
     if (unit === this.controlled) {
       // 조작 유닛 이탈 → 남은 영웅/아군으로 조작 이양
-      if (this.hero.alive && !this.heroEscaped) this.possessHeroFallback();
+      if (this.hero && this.hero.alive && !this.heroEscaped) this.possessHeroFallback();
       else {
         const next = this.allies.find((a) => a.alive && !a.escaped);
         if (next) {
@@ -694,7 +787,8 @@ export class BattleScene extends Phaser.Scene {
     this.removeMark(this.bossMarks, unit.uid);
     this.removeMark(this.surrenderFlags, unit.uid);
     if (this.selected === unit) {
-      this.selected = this.controlled && this.controlled.alive && !this.controlled.escaped ? this.controlled : this.hero;
+      this.selected =
+        this.controlled && this.controlled.alive && !this.controlled.escaped ? this.controlled : this.hero ?? this.controlled;
     }
     // 이탈 연출: 페이드아웃 후 제거
     const ghost = this.add.image(unit.x, unit.y, unit.texture.key, 0).setDepth(10).setFlipX(unit.flipX);
@@ -972,7 +1066,7 @@ export class BattleScene extends Phaser.Scene {
   // ---------- 스킬 ----------
   // 일섬: 영웅 빙의 중 + MP 충분 + 쿨다운 완료 시 발동. MP 소모.
   requestSkill() {
-    if (this.gameState !== 'playing' || !this.hero.alive) return;
+    if (this.gameState !== 'playing' || !this.hero || !this.hero.alive) return;
     if (this.controlled !== this.hero) return;
     const now = this.time.now;
     if (!this.hero.skillReady(now)) return;
@@ -994,13 +1088,23 @@ export class BattleScene extends Phaser.Scene {
 
   // UI: 스킬 버튼 활성 여부 (영웅 빙의 + MP 충분)
   canUseSkill(): boolean {
-    return this.isControllingHero() && this.hero.alive && this.hero.mp >= SKILL.ilseomMpCost;
+    return this.isControllingHero() && !!this.hero && this.hero.alive && this.hero.mp >= SKILL.ilseomMpCost;
   }
 
   restart() {
+    // 전략층에서 진입한 전투는 결과창 버튼이 전략맵 복귀로 동작
+    if (this.fromStrategy) {
+      this.returnToStrategy();
+      return;
+    }
     this.scene.stop('UIScene');
     this.scene.restart();
     this.scene.launch('UIScene');
+  }
+
+  // 전략층 전투 여부 (UIScene 결과창 버튼 라벨 분기)
+  isFromStrategy() {
+    return this.fromStrategy;
   }
 
   // ---------- UI 게터 ----------
@@ -1075,7 +1179,7 @@ export class BattleScene extends Phaser.Scene {
     // 빙의 유닛: 기본은 AI(자동 이동+공격)가 돌고, 유저 입력 중에만 이동 수동 오버라이드
     if (this.controlled && this.controlled.alive) this.controlled.updateAsControlled(delta, this.ctx);
     // 영웅은 비조작 시 매 프레임 반응 (스태거 루프에서는 제외해 중복 틱 방지)
-    if (this.hero.alive && !this.heroEscaped && this.controlled !== this.hero) this.hero.aiTick(delta, this.ctx);
+    if (this.hero && this.hero.alive && !this.heroEscaped && this.controlled !== this.hero) this.hero.aiTick(delta, this.ctx);
 
     const group = this.frameCount % AI.tickGroups;
     for (const a of this.allies) {
@@ -1182,7 +1286,7 @@ export class BattleScene extends Phaser.Scene {
 
   private handleInput() {
     if (Phaser.Input.Keyboard.JustDown(this.keys.tab)) {
-      if (this.hero.alive && !this.heroEscaped) {
+      if (this.hero && this.hero.alive && !this.heroEscaped) {
         this.possess(this.hero);
         this.selected = this.hero;
       }
@@ -1257,7 +1361,7 @@ export class BattleScene extends Phaser.Scene {
     if (this.gameState !== 'playing') return;
     const anyEscaping = this.allySquads().some((s) => s.order === 'escape');
     let ended: GameState | null = null;
-    if (!this.hero.alive && !this.heroEscaped) ended = 'lose';
+    if (this.hero && !this.hero.alive && !this.heroEscaped) ended = 'lose';
     else if (this.enemies.length === 0) ended = 'win';
     else if (this.allies.length === 0) ended = this.escapees.length > 0 ? 'escape' : 'lose';
     // 후퇴/탈출 명령 중이 아닐 때만 패주(rout) 판정 — 탈출로 병력이 빠지는 걸 패배로 오인하지 않음
@@ -1266,8 +1370,32 @@ export class BattleScene extends Phaser.Scene {
     this.finishBattle(ended);
   }
 
+  // 유닛 → 전략층 생존자 레코드
+  private toSurvivor(u: Unit): BattleSurvivor {
+    return {
+      stateUid: u.stateUid,
+      squadId: u.squadId,
+      unitType: u.unitType,
+      level: u.level,
+      exp: u.exp,
+      hp: Math.max(1, Math.round(u.hp)),
+      mp: Math.max(0, Math.round(u.mp)),
+      surrendered: u.surrendered,
+      isHero: u.unitType === 'hero',
+      label: u.label
+    };
+  }
+
   private finishBattle(outcome: GameState) {
     this.gameState = outcome;
+    const heroDied = !!this.hero && !this.hero.alive && !this.heroEscaped;
+    // 승리/패배 = 전장 잔존 아군, 탈출 = 탈출 생존자
+    const survivorUnits =
+      outcome === 'escape'
+        ? this.escapees.slice()
+        : this.allies.filter((a) => a.alive && !a.escaped).map((a) => this.toSurvivor(a));
+    const enemyRemaining = this.enemies.filter((e) => e.alive).map((e) => ({ unitType: e.unitType }));
+
     this.result = {
       win: outcome === 'win',
       outcome,
@@ -1277,6 +1405,9 @@ export class BattleScene extends Phaser.Scene {
       playerKills: this.playerKills,
       surrenderedGained: this.surrenderedGained,
       escapees: this.escapees.slice(),
+      heroDied,
+      survivorUnits,
+      enemyRemaining,
       squadSurvivors: this.allySquads().map((sr) => ({
         squadId: sr.def.id,
         name: sr.def.name,
@@ -1285,6 +1416,22 @@ export class BattleScene extends Phaser.Scene {
       }))
     };
     this.cameras.main.stopFollow();
+
+    // 전략층에서 진입한 전투면 결과를 GameState 에 반영
+    if (this.fromStrategy) {
+      applyBattleResult(this.setup, {
+        outcome: outcome as 'win' | 'lose' | 'escape',
+        heroDied,
+        survivorUnits,
+        enemyRemaining
+      });
+    }
+  }
+
+  // 전략맵으로 복귀 (결과는 finishBattle 에서 이미 반영됨)
+  returnToStrategy() {
+    this.scene.stop('UIScene');
+    this.scene.start('StrategyScene');
   }
 
   private installDebug() {
@@ -1348,7 +1495,7 @@ export class BattleScene extends Phaser.Scene {
       // 적 중심에서 폭발 강제 발동 (폭열검 AOE 검증 — 조작 유닛/영웅을 위험에 두지 않음)
       forceExplodeAtEnemies: (radius = 120, dmg = 45) => {
         if (!this.enemyCentroid) return 0;
-        return this.explodeAt(this.enemyCentroid.x, this.enemyCentroid.y, radius, dmg, 'ally', this.hero);
+        return this.explodeAt(this.enemyCentroid.x, this.enemyCentroid.y, radius, dmg, 'ally', this.hero ?? null);
       },
       enemyCentroid: () => this.enemyCentroid,
       canUseSkill: () => this.canUseSkill(),
@@ -1371,6 +1518,34 @@ export class BattleScene extends Phaser.Scene {
         return this.getInfoUnit();
       },
       result: () => this.result,
+      // ---- 전략층 연결 검증 ----
+      fromStrategy: () => this.fromStrategy,
+      setupInfo: () => ({
+        targetNodeId: this.setup.targetNodeId,
+        nodeName: this.setup.nodeName,
+        allySquadIds: this.setup.allySquadIds,
+        allyCount: this.setup.allySquads.reduce((a, s) => a + s.units.length, 0),
+        enemyCount: this.setup.enemySquads.reduce((a, s) => a + s.units.length, 0)
+      }),
+      // 전투를 즉시 승리 처리 (아군이 모든 적을 처치 → EXP 획득 + 점령)
+      forceWin: () => {
+        const killer = (this.hero && this.hero.alive ? this.hero : this.allies.find((a) => a.alive)) ?? null;
+        for (const e of this.enemies.slice()) {
+          if (e.alive) e.takeDamage(e.hp + 99999, this.ctx, killer);
+        }
+        return this.gameState;
+      },
+      // 전 아군 부대 즉시 탈출 (탈출 결과 검증)
+      forceEscape: () => {
+        for (const sr of this.allySquads()) this.setSquadOrder(sr.def.id, 'escape');
+        for (const a of this.allies.slice()) this.escapeUnit(a);
+        this.checkGameEnd();
+        return this.gameState;
+      },
+      returnToStrategy: () => {
+        this.returnToStrategy();
+        return true;
+      },
       // ---- 부대 명령 / 보스 / 투항 검증 ----
       squadInfos: () => this.getAllySquadInfos(),
       // squadId 기준으로 명령 설정. '이동'은 x,y 지점 필요.

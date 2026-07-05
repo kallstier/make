@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { GAME } from './config';
 import { BootScene } from './scenes/BootScene';
 import { TitleScene } from './scenes/TitleScene';
+import { StrategyScene } from './scenes/StrategyScene';
 import { BattleScene } from './scenes/BattleScene';
 import { UIScene } from './scenes/UIScene';
 
@@ -24,7 +25,7 @@ const config: Phaser.Types.Core.GameConfig = {
       debug: false
     }
   },
-  scene: [BootScene, TitleScene, BattleScene, UIScene]
+  scene: [BootScene, TitleScene, StrategyScene, BattleScene, UIScene]
 };
 
 const game = new Phaser.Game(config);

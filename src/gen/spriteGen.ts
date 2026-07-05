@@ -108,6 +108,7 @@ export type UnitKind =
   | 'hero'
   | 'goblin'
   | 'goblinArcher'
+  | 'bandit'
   | 'oni'
   | 'goblinKing'
   | 'oniLord';
@@ -124,6 +125,7 @@ const SHAPES: Record<UnitKind, UnitShape> = {
   hero: { gw: 20, gh: 20 },
   goblin: { gw: 16, gh: 15 },
   goblinArcher: { gw: 16, gh: 15 },
+  bandit: { gw: 16, gh: 16 },
   oni: { gw: 24, gh: 24 },
   goblinKing: { gw: 26, gh: 26 },
   oniLord: { gw: 28, gh: 28 }
@@ -208,6 +210,20 @@ export const UNIT_PALETTES: Record<UnitKind, UnitPalette> = {
     metalDark: 0x6a4d28,
     accent: 0xd8cba0,
     accentShade: 0x9a8f6a
+  },
+  // 산적: 거친 인간. 어두운 가죽 + 붉은 두건 + 도끼 강철.
+  bandit: {
+    outline: 0x1a1208,
+    skin: 0xe0a878,
+    skinShade: 0xb07c4e,
+    body: 0x6a4a30,
+    bodyShade: 0x452e1c,
+    gear: 0xb03028, // 붉은 두건
+    gearShade: 0x7a1c18,
+    metal: 0xd8dee8, // 도끼 날
+    metalDark: 0x6a4a24, // 자루
+    accent: 0x8a6a3a,
+    accentShade: 0x5a4222
   },
   oni: {
     outline: 0x2a0d0d,
@@ -304,6 +320,10 @@ function drawHumanoid(g: Grid, kind: UnitKind, P: UnitPalette, frame: number) {
   }
   if (kind === 'goblin' || kind === 'goblinArcher') {
     drawGoblin(g, kind, P, frame, cx, groundY, attack);
+    return;
+  }
+  if (kind === 'bandit') {
+    drawBandit(g, P, frame, cx, groundY, attack);
     return;
   }
 
@@ -481,6 +501,52 @@ function drawGoblin(g: Grid, kind: UnitKind, P: UnitPalette, frame: number, cx: 
       g.line(cx + 2, armY + 2, cx + 5, headCY - 3, P.metalDark);
       g.rect(cx + 4, headCY - 4, 2, 2, P.metal);
     }
+  }
+}
+
+// 산적: 인간 근접형 + 붉은 두건 + 도끼 (방패 없음, 도끼가 큼)
+function drawBandit(g: Grid, P: UnitPalette, frame: number, cx: number, groundY: number, attack: boolean) {
+  const headCY = 4;
+  const headR = 3;
+  const bodyTop = headCY + headR;
+  const bodyBot = groundY - 3;
+  const bodyW = 6;
+  const bodyX = cx - Math.floor(bodyW / 2);
+
+  drawLegs(g, cx, groundY, bodyBot, P, frame);
+
+  // 몸통 (가죽 조끼) + 어깨
+  g.rect(bodyX, bodyTop, bodyW, bodyBot - bodyTop, P.body);
+  g.vline(bodyX + bodyW - 1, bodyTop, bodyBot - 1, P.bodyShade);
+  g.rect(bodyX, bodyTop, bodyW, 1, P.accent); // 어깨선
+  g.set(cx - 1, bodyTop + 2, P.accentShade); // 가슴 벨트
+
+  // 머리
+  g.disc(cx, headCY, headR, P.skin);
+  g.set(cx + headR - 1, headCY + 1, P.skinShade);
+  g.set(cx + 1, headCY, P.outline); // 눈
+  g.set(cx + 2, headCY + 1, P.skinShade); // 수염 그늘
+
+  // 붉은 두건 (머리 위 + 뒤로 흘러내림)
+  g.rect(cx - headR, headCY - headR, headR * 2 + 1, 2, P.gear);
+  g.vline(cx - headR, headCY - headR, headCY - headR + 1, P.gearShade);
+  g.set(cx - headR - 1, headCY - headR + 1, P.gear); // 매듭 자락
+  g.set(cx - headR - 2, headCY - headR + 2, P.gearShade);
+
+  // 도끼 (오른손)
+  const armY = bodyTop + 1;
+  if (attack) {
+    // 내려찍는 자세: 자루 대각 + 도끼날 앞
+    g.line(cx + 1, armY + 1, cx + 6, armY - 3, P.metalDark);
+    g.rect(cx + 5, armY - 5, 3, 3, P.metal); // 도끼날
+    g.set(cx + 4, armY - 5, P.metal);
+    g.set(cx + 7, armY - 2, P.metalDark);
+  } else {
+    // 어깨에 걸친 도끼
+    g.line(cx + 2, armY + 2, cx + 5, headCY - 3, P.metalDark); // 자루
+    g.rect(cx + 4, headCY - 5, 3, 3, P.metal); // 도끼날
+    g.set(cx + 6, headCY - 5, P.metal);
+    g.set(cx + 4, headCY - 2, P.metalDark);
   }
 }
 
@@ -1064,6 +1130,58 @@ export function genBush(scene: Phaser.Scene, key: string) {
     g.set(bx - 1, by - r + 1, 0x54a048);
   }
   const out = g.outlined(0x143012);
+  blit(scene, key, g, out, 3);
+}
+
+// ============================================================
+// 전략 노드맵: 성채 (거점) 스프라이트
+// ============================================================
+export function genCastle(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(22, 20);
+  const wall = 0x9a8f7a;
+  const wallShade = 0x6f6555;
+  const wallLite = 0xc0b49a;
+  const gate = 0x3a2a18;
+  // 성벽 본체
+  g.rect(2, 9, 18, 10, wall);
+  g.vline(19, 9, 18, wallShade);
+  g.rect(2, 9, 18, 1, wallLite);
+  // 흉벽(총안) — 위쪽 요철
+  for (let x = 2; x <= 19; x += 3) {
+    g.rect(x, 7, 2, 2, wall);
+    g.set(x, 7, wallLite);
+  }
+  // 좌우 탑
+  g.rect(1, 5, 4, 14, wall);
+  g.rect(17, 5, 4, 14, wall);
+  g.vline(4, 5, 18, wallShade);
+  g.vline(20, 5, 18, wallShade);
+  for (let x = 1; x <= 4; x += 2) g.rect(x, 3, 1, 2, wall);
+  for (let x = 17; x <= 20; x += 2) g.rect(x, 3, 1, 2, wall);
+  // 중앙 성문
+  g.rect(9, 12, 4, 7, gate);
+  g.rect(9, 12, 4, 1, 0x241a0e);
+  g.disc(11, 12, 2, gate);
+  // 돌 이음새
+  g.set(7, 13, wallShade);
+  g.set(14, 15, wallShade);
+  g.set(5, 16, wallShade);
+  const out = g.outlined(0x2a2018);
+  blit(scene, key, g, out, 3);
+}
+
+// 노드 소유 깃발 (성 위에 꽂히는 작은 삼각기). color = 진영 색.
+export function genNodeFlag(scene: Phaser.Scene, key: string, color: number) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(12, 16);
+  g.vline(2, 0, 15, 0x3a2a12); // 깃대
+  for (let y = 1; y <= 6; y++) {
+    const ww = 8 - y;
+    if (ww >= 1) g.rect(3, y, ww, 1, color);
+  }
+  g.set(4, 3, 0xffffff); // 문양
+  const out = g.outlined(0x101010);
   blit(scene, key, g, out, 3);
 }
 

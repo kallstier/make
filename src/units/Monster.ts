@@ -1,7 +1,7 @@
 import { Unit, BattleContext, CombatStats } from './Unit';
 import { MONSTER, BOSS_TYPES } from '../config';
 
-export type MonsterKind = 'goblin' | 'goblinArcher' | 'oni' | 'goblinKing' | 'oniLord';
+export type MonsterKind = 'goblin' | 'goblinArcher' | 'bandit' | 'oni' | 'goblinKing' | 'oniLord';
 
 export function monsterTexKey(kind: MonsterKind, squadId: number) {
   return `u_${kind}_${squadId}`;
@@ -18,7 +18,12 @@ export class Monster extends Unit {
       unitType: kind,
       squadId,
       knockback: s.knockback,
-      particleColor: kind === 'oni' || kind === 'oniLord' ? 0xd23b3b : 0x6bbf4a
+      particleColor:
+        kind === 'oni' || kind === 'oniLord'
+          ? 0xd23b3b
+          : kind === 'bandit'
+          ? 0xc0303a
+          : 0x6bbf4a
     });
     this.kind = kind;
     this.isBoss = BOSS_TYPES.includes(kind);

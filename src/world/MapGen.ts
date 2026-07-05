@@ -31,6 +31,108 @@ export interface Decoration {
   type: 'tree' | 'rock' | 'bush';
 }
 
+// ============================================================
+// 전략 노드맵 배경: 대륙 일부 (초원 + 산맥 + 강 + 해안)
+// 절차 생성 픽셀풍. 반환 = 텍스처 키.
+// ============================================================
+export function genContinent(scene: Phaser.Scene, w: number, h: number, key = 'continent'): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+
+  const landN = makeNoise(9137);
+  const detailN = makeNoise(3312);
+  const tile = 10;
+  const cols = Math.ceil(w / tile);
+  const rows = Math.ceil(h / tile);
+
+  // 해안선: 오른쪽/아래쪽으로 바다가 잠식하는 대각 경계
+  const seaEdge = (fx: number, fy: number) => {
+    // 정규화 좌표
+    const nx = fx / w;
+    const ny = fy / h;
+    // 남동쪽(오른아래)이 바다. 경계는 노이즈로 들쭉날쭉.
+    const wobble = (landN(fx / 260, fy / 260) - 0.5) * 0.22;
+    return nx * 0.55 + ny * 0.62 + wobble; // > ~0.92 → 바다
+  };
+
+  const grass = ['#3f7f38', '#4a8a40', '#3a7433', '#548f48', '#437d3b'];
+  const sand = ['#cdb884', '#d8c48f', '#c2ad78'];
+  const sea = ['#2a5f86', '#245576', '#316d96'];
+  const seaDeep = '#1c445e';
+  const mtn = ['#7a6f5e', '#8a7f6c', '#6a5f50'];
+  const mtnSnow = '#e4e0d4';
+
+  for (let ty = 0; ty < rows; ty++) {
+    for (let tx = 0; tx < cols; tx++) {
+      const px = tx * tile;
+      const py = ty * tile;
+      const e = seaEdge(px, py);
+      let color: string;
+      if (e > 0.95) {
+        color = seaDeep;
+      } else if (e > 0.9) {
+        color = sea[Math.floor(detailN(tx / 3, ty / 3) * sea.length) % sea.length];
+      } else if (e > 0.87) {
+        color = sand[Math.floor(detailN(tx / 2, ty / 2) * sand.length) % sand.length];
+      } else {
+        // 육지: 산맥 밴드 (북서쪽 고지)
+        const mt = landN(tx / 9 + 3, ty / 9);
+        const ridge = detailN(tx / 4, ty / 4);
+        if (mt > 0.66 && px < w * 0.66) {
+          if (mt > 0.8 && ridge > 0.6) color = mtnSnow;
+          else color = mtn[Math.floor(ridge * mtn.length) % mtn.length];
+        } else {
+          const n = landN(tx / 6, ty / 6);
+          const d = detailN(tx / 2.2, ty / 2.2);
+          let idx = Math.floor((n * 0.7 + d * 0.3) * grass.length) % grass.length;
+          color = grass[idx];
+        }
+      }
+      ctx.fillStyle = color;
+      ctx.fillRect(px, py, tile, tile);
+    }
+  }
+
+  // 강: 위(북)에서 아래(남동 바다)로 굽이치는 물줄기
+  const drawRiver = (startX: number, points: number) => {
+    let x = startX;
+    let y = 0;
+    ctx.strokeStyle = '#3a79a0';
+    for (let i = 0; i < points; i++) {
+      const ny = y + h / points;
+      const nx = x + Math.sin(i * 0.9 + startX) * 46 + 26;
+      ctx.lineWidth = 9 + Math.sin(i) * 2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(nx, ny);
+      ctx.stroke();
+      x = nx;
+      y = ny;
+    }
+  };
+  drawRiver(w * 0.42, 12);
+
+  // 부드러운 명암 (고지 밝게, 저지 그늘)
+  const shade: [number, number, number, string][] = [
+    [w * 0.3, h * 0.3, 420, 'rgba(255,255,225,0.08)'],
+    [w * 0.7, h * 0.7, 460, 'rgba(0,0,0,0.10)']
+  ];
+  for (const [sx, sy, sr, col] of shade) {
+    const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr);
+    grad.addColorStop(0, col);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  if (scene.textures.exists(key)) scene.textures.remove(key);
+  scene.textures.addCanvas(key, canvas);
+  return key;
+}
+
 // 숲 덩어리 정의 (손 설계)
 const FORESTS = [
   { x: 260, y: 240, r: 150, n: 12 },

@@ -65,6 +65,7 @@ export const ITEMS: Record<string, Item> = {
   long_spear: { id: 'long_spear', name: '장창', slot: 'weapon', mods: { atk: 4 } },
   gob_club: { id: 'gob_club', name: '몽둥이', slot: 'weapon', mods: { atk: 2 } },
   gob_bow: { id: 'gob_bow', name: '고블린 활', slot: 'weapon', mods: { atk: 2 } },
+  bandit_axe: { id: 'bandit_axe', name: '도끼', slot: 'weapon', mods: { atk: 5 } },
   kongo_staff: {
     id: 'kongo_staff',
     name: '금강저',
@@ -153,6 +154,12 @@ export const DEFAULT_LOADOUT: Record<UnitType, Partial<Record<EquipSlot, string>
   goblinArcher: {
     weapon: 'gob_bow',
     helmet: 'gob_rag_hood'
+  },
+  bandit: {
+    weapon: 'bandit_axe',
+    helmet: 'hood',
+    top: 'gob_rag_top',
+    bottom: 'gob_rag_bottom'
   },
   oni: {
     weapon: 'kongo_staff',

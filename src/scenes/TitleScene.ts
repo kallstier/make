@@ -43,7 +43,7 @@ export class TitleScene extends Phaser.Scene {
       ease: 'Sine.InOut'
     });
 
-    const sub = this.add.text(w / 2, h * 0.45, '부대 전술 명령으로 지휘하는 밀집 야전', {
+    const sub = this.add.text(w / 2, h * 0.45, '거점을 점령해 대륙을 통일하는 턴제 전략 + 밀집 야전', {
       fontFamily: 'sans-serif',
       fontSize: '20px',
       color: '#cfd8e8'
@@ -79,14 +79,13 @@ export class TitleScene extends Phaser.Scene {
     zone.on('pointerover', () => drawBtn(true));
     zone.on('pointerout', () => drawBtn(false));
     zone.on('pointerdown', () => {
-      this.scene.start('BattleScene');
-      this.scene.launch('UIScene');
+      this.scene.start('StrategyScene');
     });
 
     const hint = this.add.text(
       w / 2,
       h * 0.82,
-      '모바일: 왼쪽 드래그 이동 / 오른쪽 버튼 스킬 / 아군 탭 빙의 · 유닛 탭 정보 / 좌상단 부대 명령\n데스크톱: WASD·화살표 이동 / 스페이스 스킬 / Tab 영웅 복귀 / 1·2 부대선택 · ZXCVB 돌격·정지·이동·후퇴·탈출',
+      '전략맵: 부대를 탭해 선택 → 인접 거점 탭으로 이동 예약 → 턴 종료로 진군·점령\n전투: 왼쪽 드래그 이동 / 오른쪽 버튼 스킬 / 아군 탭 빙의 · 유닛 탭 정보 / 좌상단 부대 명령',
       {
         fontFamily: 'sans-serif',
         fontSize: '16px',

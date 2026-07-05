@@ -1,8 +1,8 @@
 import Phaser from 'phaser';
-import { SQUADS } from '../config';
 import { Hero } from '../units/Hero';
 import { Projectile } from '../units/Projectile';
 import { EQUIP_SLOTS, SLOT_ICON } from '../rpg/items';
+import { initGameState, garrisonIconType } from '../state/GameState';
 import {
   genUnit,
   genBanner,
@@ -19,6 +19,8 @@ import {
   genBossMark,
   genWhiteFlag,
   genOrderFlag,
+  genCastle,
+  genNodeFlag,
   UnitKind
 } from '../gen/spriteGen';
 
@@ -29,13 +31,33 @@ export class BootScene extends Phaser.Scene {
   }
 
   create() {
-    // 부대별 병종 텍스처 (소속 색조 반영)
-    for (const sq of SQUADS) {
-      for (const c of sq.composition) {
-        genUnit(this, `u_${c.type}_${sq.id}`, c.type as UnitKind, sq.tint);
+    // 전략층 초기 상태 구성 (부대/거점/수비 편성) — 텍스처 생성의 기준이 된다
+    const state = initGameState();
+
+    // 아군 부대별 병종 텍스처 + 배너 (소속 색조 반영)
+    for (const sq of state.squads) {
+      const seen = new Set<string>();
+      for (const u of sq.units) {
+        if (seen.has(u.unitType)) continue;
+        seen.add(u.unitType);
+        genUnit(this, `u_${u.unitType}_${sq.id}`, u.unitType as UnitKind, sq.tint);
       }
       genBanner(this, `banner_${sq.id}`, sq.banner);
     }
+
+    // 거점 수비대(몬스터) 병종 텍스처 + 배너
+    for (const node of state.nodes) {
+      for (const g of node.garrison) {
+        genUnit(this, `u_${g.type}_${node.enemySquadId}`, g.type as UnitKind, node.enemyTint);
+      }
+      genBanner(this, `banner_${node.enemySquadId}`, node.enemyBanner);
+      void garrisonIconType(node);
+    }
+
+    // 전략 노드맵 에셋: 성채 + 소유 깃발
+    genCastle(this, 'castle');
+    genNodeFlag(this, 'nodeFlag_ally', 0x3b6ef0);
+    genNodeFlag(this, 'nodeFlag_monster', 0x8a2a2a);
 
     Hero.preloadRing(this);
     Projectile.preload(this);

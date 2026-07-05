@@ -62,6 +62,8 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
   // 직업(class): 현재는 병종과 1:1. 전직(예정) 시 unitType과 분리될 자리.
   classId: UnitType;
   squadId: number;
+  // 전략층 유닛 상태(UnitState)와의 연결 식별자. null = 신규(투항 편입병) / 전략층 무관.
+  stateUid: number | null = null;
 
   // ---- RPG 스탯 ----
   level: number;
