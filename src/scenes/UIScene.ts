@@ -8,16 +8,23 @@ export class UIScene extends Phaser.Scene {
   private topText!: Phaser.GameObjects.Text;
   private heroMiniText!: Phaser.GameObjects.Text;
 
-  // 하단 정보 바 (FQ4식)
+  // 하단 정보 바 (2단: 1단 스탯 / 2단 장비)
   private infoPanel!: Phaser.GameObjects.Graphics;
   private faceFrame!: Phaser.GameObjects.Graphics;
   private faceIcon!: Phaser.GameObjects.Image;
   private nameText!: Phaser.GameObjects.Text;
-  private typeText!: Phaser.GameObjects.Text;
+  private lvClassText!: Phaser.GameObjects.Text;
   private tagText!: Phaser.GameObjects.Text;
+  private atkDefText!: Phaser.GameObjects.Text;
   private infoHpBar!: Phaser.GameObjects.Graphics;
   private infoHpText!: Phaser.GameObjects.Text;
-  private killText!: Phaser.GameObjects.Text;
+  private infoMpBar!: Phaser.GameObjects.Graphics;
+  private infoMpText!: Phaser.GameObjects.Text;
+  private killExpText!: Phaser.GameObjects.Text;
+  private procDescText!: Phaser.GameObjects.Text;
+  // 장비 6슬롯 (아이콘 + 이름)
+  private equipIcons: Phaser.GameObjects.Image[] = [];
+  private equipNames: Phaser.GameObjects.Text[] = [];
   private lastFaceKey = '';
 
   private skillBtn!: Phaser.GameObjects.Graphics;
@@ -28,7 +35,7 @@ export class UIScene extends Phaser.Scene {
   private skillR = 40;
 
   private barY = 0;
-  private barH = 78;
+  private barH = 120;
 
   private shownState: GameState | null = null;
 
@@ -40,6 +47,8 @@ export class UIScene extends Phaser.Scene {
     this.battle = this.scene.get('BattleScene') as BattleScene;
     this.shownState = null;
     this.lastFaceKey = '';
+    this.equipIcons = [];
+    this.equipNames = [];
 
     // 상단 요약
     const panel = this.add.graphics();
@@ -64,14 +73,15 @@ export class UIScene extends Phaser.Scene {
     this.faceIcon.setVisible(false);
     this.nameText = this.add.text(0, 0, '', {
       fontFamily: 'sans-serif',
-      fontSize: '19px',
+      fontSize: '18px',
       fontStyle: 'bold',
       color: '#ffffff'
     });
-    this.typeText = this.add.text(0, 0, '', {
+    this.lvClassText = this.add.text(0, 0, '', {
       fontFamily: 'sans-serif',
-      fontSize: '13px',
-      color: '#bcd0ea'
+      fontSize: '14px',
+      fontStyle: 'bold',
+      color: '#ffe066'
     });
     this.tagText = this.add.text(0, 0, '', {
       fontFamily: 'sans-serif',
@@ -79,17 +89,46 @@ export class UIScene extends Phaser.Scene {
       fontStyle: 'bold',
       color: '#ffe066'
     });
+    this.atkDefText = this.add.text(0, 0, '', {
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      color: '#bcd0ea'
+    });
     this.infoHpBar = this.add.graphics();
     this.infoHpText = this.add.text(0, 0, '', {
       fontFamily: 'monospace',
-      fontSize: '14px',
+      fontSize: '12px',
       color: '#ffffff'
     });
-    this.killText = this.add.text(0, 0, '', {
+    this.infoMpBar = this.add.graphics();
+    this.infoMpText = this.add.text(0, 0, '', {
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      color: '#cfe0ff'
+    });
+    this.killExpText = this.add.text(0, 0, '', {
       fontFamily: 'sans-serif',
-      fontSize: '14px',
+      fontSize: '12px',
       color: '#ffd0a0'
     });
+    this.procDescText = this.add.text(0, 0, '', {
+      fontFamily: 'sans-serif',
+      fontSize: '12px',
+      fontStyle: 'bold',
+      color: '#ff9a4a'
+    });
+    // 장비 6슬롯 아이콘 + 이름
+    for (let i = 0; i < 6; i++) {
+      const icon = this.add.image(0, 0, 'item_weapon').setVisible(false);
+      icon.setScale(1.4);
+      this.equipIcons.push(icon);
+      const nm = this.add.text(0, 0, '', {
+        fontFamily: 'sans-serif',
+        fontSize: '11px',
+        color: '#c8d4e8'
+      });
+      this.equipNames.push(nm);
+    }
 
     // 스킬 버튼
     this.layout();
@@ -132,7 +171,7 @@ export class UIScene extends Phaser.Scene {
 
     this.drawInfoPanel();
 
-    const skillEnabled = this.battle.isControllingHero();
+    const skillEnabled = this.battle.canUseSkill();
     this.drawSkillButton(this.battle.getSkillCdRatio(), skillEnabled);
     this.skillLabel.setAlpha(skillEnabled ? 1 : 0.4);
 
@@ -143,36 +182,50 @@ export class UIScene extends Phaser.Scene {
     }
   }
 
+  private hideInfo() {
+    this.faceIcon.setVisible(false);
+    this.nameText.setText('');
+    this.lvClassText.setText('');
+    this.tagText.setText('');
+    this.atkDefText.setText('');
+    this.infoHpText.setText('');
+    this.infoMpText.setText('');
+    this.killExpText.setText('');
+    this.procDescText.setText('');
+    this.infoHpBar.clear();
+    this.infoMpBar.clear();
+    for (const ic of this.equipIcons) ic.setVisible(false);
+    for (const nm of this.equipNames) nm.setText('');
+  }
+
   private drawInfoPanel() {
     const w = this.scale.width;
     const y = this.barY;
     const info = this.battle.getInfoUnit();
 
     this.infoPanel.clear();
-    this.infoPanel.fillStyle(0x0a1020, 0.82);
+    this.infoPanel.fillStyle(0x0a1020, 0.85);
     this.infoPanel.fillRect(0, y, w, this.barH);
     this.infoPanel.lineStyle(2, 0x3a4a6a, 0.9);
     this.infoPanel.lineBetween(0, y, w, y);
+    // 1단/2단 구분선
+    const rowSplit = y + 82;
+    this.infoPanel.lineStyle(1, 0x2a3a5a, 0.7);
+    this.infoPanel.lineBetween(10, rowSplit, w - 10, rowSplit);
 
     this.faceFrame.clear();
     if (!info) {
-      this.faceIcon.setVisible(false);
-      this.nameText.setText('');
-      this.typeText.setText('');
-      this.tagText.setText('');
-      this.infoHpText.setText('');
-      this.killText.setText('');
-      this.infoHpBar.clear();
+      this.hideInfo();
       return;
     }
 
     const isEnemy = info.faction === 'enemy';
     const accent = isEnemy ? 0xd23b3b : info.possessed ? 0xffd23b : 0x3b8ef0;
 
-    // 얼굴 아이콘 박스
-    const boxX = 14;
+    // 얼굴 아이콘 박스 (1단 높이)
+    const boxX = 12;
     const boxY = y + 8;
-    const boxS = this.barH - 16;
+    const boxS = 66;
     this.faceFrame.fillStyle(0x000000, 0.5);
     this.faceFrame.fillRoundedRect(boxX, boxY, boxS, boxS, 6);
     this.faceFrame.lineStyle(2, accent, 1);
@@ -185,42 +238,83 @@ export class UIScene extends Phaser.Scene {
       this.faceIcon.setFrame(0);
     }
     const fr = this.textures.getFrame(info.textureKey, 0);
-    const scale = fr ? Math.min((boxS - 8) / fr.width, (boxS - 6) / fr.height) * 1.15 : 1;
+    const scale = fr ? Math.min((boxS - 8) / fr.width, (boxS - 6) / fr.height) * 1.1 : 1;
     this.faceIcon.setVisible(true);
     this.faceIcon.setScale(scale);
-    this.faceIcon.setPosition(boxX + boxS / 2, boxY + boxS / 2 + 4);
+    this.faceIcon.setPosition(boxX + boxS / 2, boxY + boxS / 2 + 3);
 
-    // 텍스트 열
+    // ---- 1단: 스탯 ----
     const tx = boxX + boxS + 14;
-    this.nameText.setPosition(tx, y + 10);
+    this.nameText.setPosition(tx, y + 8);
     this.nameText.setText(info.label);
     this.nameText.setColor(isEnemy ? '#ff9a9a' : '#ffffff');
 
-    this.typeText.setPosition(tx, y + 34);
-    this.typeText.setText(`병종: ${info.typeName}`);
-
-    this.tagText.setPosition(tx + 120, y + 34);
+    // 빙의/소속 태그는 이름 행 우측에
+    this.tagText.setPosition(tx + 190, y + 10);
     this.tagText.setText(info.possessed ? '● 빙의 중' : isEnemy ? '적' : '아군');
     this.tagText.setColor(info.possessed ? '#ffe066' : isEnemy ? '#ff8080' : '#8fc0ff');
 
+    this.lvClassText.setPosition(tx, y + 30);
+    this.lvClassText.setText(`LV ${info.level}  ${info.typeName}`);
+
+    this.atkDefText.setPosition(tx + 120, y + 31);
+    this.atkDefText.setText(`ATK ${info.atk}  DEF ${info.def}`);
+
     // HP 바
     const hbx = tx;
-    const hby = y + 54;
-    const hbw = 210;
-    const hbh = 12;
+    const hby = y + 48;
+    const hbw = 200;
+    const hbh = 11;
     this.infoHpBar.clear();
     this.infoHpBar.fillStyle(0x000000, 0.6);
     this.infoHpBar.fillRect(hbx - 2, hby - 2, hbw + 4, hbh + 4);
-    const ratio = Phaser.Math.Clamp(info.hp / info.max, 0, 1);
-    const col = ratio > 0.5 ? 0x4ce04c : ratio > 0.25 ? 0xe0c04c : 0xe04c4c;
-    this.infoHpBar.fillStyle(col, 1);
-    this.infoHpBar.fillRect(hbx, hby, hbw * ratio, hbh);
-    this.infoHpText.setPosition(hbx + hbw + 10, hby - 2);
-    this.infoHpText.setText(`${info.hp}/${info.max}`);
+    const hpr = Phaser.Math.Clamp(info.hp / info.max, 0, 1);
+    const hcol = hpr > 0.5 ? 0x4ce04c : hpr > 0.25 ? 0xe0c04c : 0xe04c4c;
+    this.infoHpBar.fillStyle(hcol, 1);
+    this.infoHpBar.fillRect(hbx, hby, hbw * hpr, hbh);
+    this.infoHpText.setPosition(hbx + hbw + 8, hby - 2);
+    this.infoHpText.setText(`HP ${info.hp}/${info.max}`);
 
-    // 처치 수
-    this.killText.setPosition(tx + 300, y + 10);
-    this.killText.setText(`처치 ${info.kills}`);
+    // MP 바 (파랑)
+    const mby = y + 64;
+    const mbh = 9;
+    this.infoMpBar.clear();
+    this.infoMpBar.fillStyle(0x000000, 0.6);
+    this.infoMpBar.fillRect(hbx - 2, mby - 2, hbw + 4, mbh + 4);
+    const mpr = info.maxMp > 0 ? Phaser.Math.Clamp(info.mp / info.maxMp, 0, 1) : 0;
+    this.infoMpBar.fillStyle(0x3b8ef0, 1);
+    this.infoMpBar.fillRect(hbx, mby, hbw * mpr, mbh);
+    this.infoMpText.setPosition(hbx + hbw + 8, mby - 3);
+    this.infoMpText.setText(`MP ${info.mp}/${info.maxMp}`);
+
+    // 처치 · EXP
+    const expStr = info.expNext === Infinity ? 'MAX' : `${info.exp}/${info.expNext}`;
+    this.killExpText.setPosition(tx + 330, y + 8);
+    this.killExpText.setText(`처치 ${info.kills}    EXP ${expStr}`);
+
+    // 무기 proc 스킬 설명 한 줄 (있을 때만)
+    this.procDescText.setPosition(tx + 330, y + 30);
+    this.procDescText.setText(info.procDesc ?? '');
+
+    // ---- 2단: 장비 6슬롯 ----
+    const rowY = rowSplit + 4;
+    const cellW = (w - 24) / 6;
+    for (let i = 0; i < 6; i++) {
+      const e = info.equip[i];
+      const cx = 12 + cellW * i;
+      const ic = this.equipIcons[i];
+      const nm = this.equipNames[i];
+      // 아이콘
+      ic.setVisible(true);
+      ic.setTexture(e.iconKey);
+      ic.setAlpha(e.filled ? 1 : 0.3);
+      ic.setPosition(cx + 14, rowY + 15);
+      // 이름 (비면 회색 '-')
+      nm.setPosition(cx + 30, rowY + 2);
+      nm.setText(`${e.slotName}\n${e.name}`);
+      nm.setColor(!e.filled ? '#6a7488' : e.highlight ? '#ff9a4a' : '#c8d4e8');
+      nm.setFontStyle(e.highlight ? 'bold' : 'normal');
+    }
   }
 
   private drawSkillButton(cd: number, enabled: boolean) {

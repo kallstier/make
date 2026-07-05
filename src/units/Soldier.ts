@@ -17,8 +17,6 @@ export class Soldier extends Unit {
       faction: 'ally',
       unitType: kind,
       squadId,
-      hp: s.hp,
-      speed: s.speed,
       knockback: s.knockback,
       particleColor: 0xc0303a
     });
@@ -31,25 +29,11 @@ export class Soldier extends Unit {
     return {
       detectRange: s.detectRange,
       attackRange: s.attackRange,
-      attackDamage: s.attackDamage,
+      attackDamage: this.getAtk(),
       attackCooldown: s.attackCooldown,
       keepDist: (s as any).keepDist,
       projectileSpeed: (s as any).projectileSpeed
     };
-  }
-
-  protected playerAttack(ctx: BattleContext) {
-    const s = this.stats();
-    const enemy = ctx.findNearestEnemy('ally', this.x, this.y, s.attackRange);
-    if (enemy && ctx.time - this.lastAttack >= s.attackCooldown) {
-      this.lastAttack = ctx.time;
-      if (this.kind === 'ranged') {
-        ctx.spawnProjectile(this.x, this.y - this.height * 0.28, enemy, s.attackDamage, 'ally', s.projectileSpeed ?? 420);
-      } else {
-        enemy.takeDamage(s.attackDamage, ctx, this);
-        this.attackVisual(ctx, enemy.x, enemy.y);
-      }
-    }
   }
 
   aiTick(dt: number, ctx: BattleContext): void {

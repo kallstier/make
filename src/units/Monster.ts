@@ -17,8 +17,6 @@ export class Monster extends Unit {
       faction: 'enemy',
       unitType: kind,
       squadId,
-      hp: s.hp,
-      speed: s.speed,
       knockback: s.knockback,
       particleColor: kind === 'oni' ? 0xd23b3b : 0x6bbf4a
     });
@@ -31,7 +29,7 @@ export class Monster extends Unit {
     return {
       detectRange: s.detectRange,
       attackRange: s.attackRange,
-      attackDamage: s.attackDamage,
+      attackDamage: this.getAtk(),
       attackCooldown: s.attackCooldown,
       keepDist: (s as any).keepDist,
       projectileSpeed: (s as any).projectileSpeed

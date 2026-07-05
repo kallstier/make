@@ -691,6 +691,94 @@ export function genSkillRing(scene: Phaser.Scene, key: string) {
 }
 
 // ============================================================
+// 폭발(폭열검) 이펙트: 확장 링 + 화염 파편 파티클
+// ============================================================
+export function genExplosionRing(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const c = size / 2;
+  // 바깥 주황 링
+  ctx.strokeStyle = 'rgba(255,140,40,0.95)';
+  ctx.lineWidth = 8;
+  ctx.beginPath();
+  ctx.arc(c, c, c - 10, 0, Math.PI * 2);
+  ctx.stroke();
+  // 안쪽 노란 링
+  ctx.strokeStyle = 'rgba(255,220,120,0.85)';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(c, c, c - 22, 0, Math.PI * 2);
+  ctx.stroke();
+  // 코어 광
+  const grad = ctx.createRadialGradient(c, c, 2, c, c, c - 24);
+  grad.addColorStop(0, 'rgba(255,240,190,0.55)');
+  grad.addColorStop(1, 'rgba(255,120,30,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(c, c, c - 24, 0, Math.PI * 2);
+  ctx.fill();
+  scene.textures.addCanvas(key, canvas);
+}
+
+// 화염 파편 (작은 불꽃 사각). 색조는 파티클 tint로 변주.
+export function genFireShard(scene: Phaser.Scene, key: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(6, 6);
+  g.disc(3, 3, 2, 0xffd24a);
+  g.set(3, 2, 0xffffff);
+  g.set(2, 3, 0xff8a30);
+  g.set(4, 4, 0xff5a20);
+  const out = g.outlined(0x7a2a08);
+  blit(scene, key, g, out, 3);
+}
+
+// ============================================================
+// 장비 슬롯 아이콘 (하단 정보창용 작은 픽셀 글리프)
+// ============================================================
+export function genItemIcon(scene: Phaser.Scene, key: string, slot: string) {
+  if (scene.textures.exists(key)) return;
+  const g = new Grid(12, 12);
+  if (slot === 'weapon') {
+    // 검
+    g.line(3, 9, 8, 4, 0xd8dee8);
+    g.line(4, 9, 9, 4, 0xf0f4fa);
+    g.rect(2, 8, 3, 1, 0x8a6a34); // 가드
+    g.set(2, 9, 0x6a4a24); // 손잡이
+    g.set(9, 3, 0xffffff);
+  } else if (slot === 'helmet') {
+    g.disc(6, 5, 3, 0xb9c6da);
+    g.rect(3, 5, 7, 2, 0x7c8aa4);
+    g.set(6, 1, 0xd9b64a); // 볏
+    g.set(6, 2, 0xd9b64a);
+  } else if (slot === 'top') {
+    g.rect(3, 3, 6, 6, 0x3f74e0);
+    g.vline(8, 3, 8, 0x274ea0);
+    g.rect(2, 3, 2, 2, 0x274ea0); // 어깨
+    g.rect(8, 3, 2, 2, 0x274ea0);
+    g.set(6, 5, 0x9ab0e8);
+  } else if (slot === 'bottom') {
+    g.rect(3, 3, 6, 3, 0x5a6ea0);
+    g.rect(3, 6, 2, 4, 0x445488); // 왼다리
+    g.rect(7, 6, 2, 4, 0x445488); // 오른다리
+  } else if (slot === 'gloves') {
+    g.rect(4, 4, 4, 5, 0x8a5a34);
+    g.set(3, 4, 0x8a5a34); // 엄지
+    g.set(4, 3, 0xb07a44);
+    g.rect(4, 8, 4, 1, 0x5a3a1a);
+  } else if (slot === 'boots') {
+    g.rect(4, 3, 3, 6, 0x6a4a2a);
+    g.rect(4, 8, 6, 2, 0x4a3018); // 밑창
+    g.set(5, 3, 0x8a6a44);
+  }
+  const out = g.outlined(0x14100a);
+  blit(scene, key, g, out, 3);
+}
+
+// ============================================================
 // 파티클 (사망 핏빛 파편 등)
 // ============================================================
 export function genParticle(scene: Phaser.Scene, key: string, color: number) {

@@ -10,6 +10,8 @@ import {
   FORMATION,
   OUTCOME,
   SQUADS,
+  SKILL,
+  CLASS_NAME,
   UnitType,
   SquadDef
 } from '../config';
@@ -21,18 +23,22 @@ import { Projectile } from '../units/Projectile';
 import { genBattlefield } from '../world/MapGen';
 import { FloatingStick } from '../input/FloatingStick';
 import { FRAME } from '../gen/spriteGen';
+import { EQUIP_SLOTS, SLOT_ICON, SLOT_NAME, itemProc, EquipSlot } from '../rpg/items';
+import { expForNext } from '../rpg/stats';
 
 export type GameState = 'playing' | 'win' | 'lose';
 
-const TYPE_NAME: Record<UnitType, string> = {
-  hero: '영웅',
-  melee: '검병',
-  ranged: '궁병',
-  spear: '창병',
-  goblin: '고블린',
-  goblinArcher: '고블린 궁수',
-  oni: '오니'
-};
+const TYPE_NAME = CLASS_NAME;
+
+// 하단 정보창 장비 표시 항목
+export interface InfoEquipSlot {
+  slot: EquipSlot;
+  slotName: string;
+  iconKey: string;
+  name: string; // 아이템 이름 또는 '-'
+  filled: boolean;
+  highlight: boolean;
+}
 
 interface SquadRuntime {
   def: SquadDef;
@@ -152,7 +158,7 @@ export class BattleScene extends Phaser.Scene {
       spawnProjectile: (x, y, t, dmg, f, s) => this.spawnProjectile(x, y, t, dmg, f, s),
       onUnitDied: (u, k) => this.onUnitDied(u, k),
       spawnCorpse: (u) => this.spawnCorpse(u),
-      spawnDamageNumber: (x, y, a, f) => this.spawnDamageNumber(x, y, a, f),
+      spawnDamageNumber: (x, y, a, f, color) => this.spawnDamageNumber(x, y, a, f, color),
       spawnSpark: (x, y) => this.spawnSpark(x, y),
       emitBlood: (x, y, c) => this.emitBlood(x, y, c),
       heroRef: () => (this.hero && this.hero.alive ? this.hero : null),
@@ -163,7 +169,10 @@ export class BattleScene extends Phaser.Scene {
           ? this.hero
           : null,
       combatActive: () => this.time.now - this.battleStartTime >= FORMATION.marchStartDelay,
-      rallyPoint: (f) => (f === 'ally' ? this.enemyCentroid : this.allyCentroid)
+      rallyPoint: (f) => (f === 'ally' ? this.enemyCentroid : this.allyCentroid),
+      explodeAt: (x, y, r, dmg, f, atk) => this.explodeAt(x, y, r, dmg, f, atk),
+      applyStun: (t, ms) => this.applyStun(t, ms),
+      spawnLevelUpText: (x, y) => this.spawnLevelUpText(x, y)
     };
 
     // 부대 편성 스폰
@@ -458,12 +467,12 @@ export class BattleScene extends Phaser.Scene {
     this.time.delayedCall(450, () => emitter.destroy());
   }
 
-  private spawnDamageNumber(x: number, y: number, amount: number, faction: Faction) {
+  private spawnDamageNumber(x: number, y: number, amount: number, faction: Faction, color?: string) {
     const t = this.dmgPool.find((d) => !d.active);
     if (!t) return;
     t.setActive(true).setVisible(true);
     t.setText(String(amount));
-    t.setColor(faction === 'ally' ? '#ff9a9a' : '#fff2c0');
+    t.setColor(color ?? (faction === 'ally' ? '#ff9a9a' : '#fff2c0'));
     t.setPosition(x + (Math.random() - 0.5) * 6, y);
     t.setAlpha(1);
     t.setScale(1);
@@ -492,6 +501,82 @@ export class BattleScene extends Phaser.Scene {
       duration: FX.sparkLifespan,
       ease: 'Quad.Out',
       onComplete: () => s.setActive(false).setVisible(false)
+    });
+  }
+
+  // ---------- 스킬 장비(proc) 연출/판정 ----------
+  // 폭발 AOE: 지점 반경 내 상대 진영에 마법 피해 + 화염 이펙트 + 화면 흔들림.
+  // 반환값 = 피해를 준 적 수 (디버그 검증용).
+  private explodeAt(x: number, y: number, radius: number, damage: number, faction: Faction, attacker: Unit | null): number {
+    const list = faction === 'ally' ? this.enemies : this.allies;
+    const r2 = radius * radius;
+    let hit = 0;
+    for (const u of list.slice()) {
+      if (!u.alive) continue;
+      const dx = u.x - x;
+      const dy = u.y - y;
+      if (dx * dx + dy * dy <= r2) {
+        u.takeDamage(damage, this.ctx, attacker, '#ffb030'); // 주황 전용 색
+        hit++;
+      }
+    }
+    this.spawnExplosionFx(x, y, radius);
+    this.cameras.main.shake(140, 0.006);
+    return hit;
+  }
+
+  private spawnExplosionFx(x: number, y: number, radius: number) {
+    // 확장 링
+    const ring = this.add.image(x, y, 'explosionRing').setDepth(31);
+    ring.setScale(0.15).setAlpha(0.95);
+    this.tweens.add({
+      targets: ring,
+      scale: (radius * 2) / 128,
+      alpha: 0,
+      duration: 320,
+      ease: 'Cubic.Out',
+      onComplete: () => ring.destroy()
+    });
+    // 화염 파편
+    const emitter = this.add.particles(x, y, 'fireShard', {
+      speed: { min: 60, max: 200 },
+      angle: { min: 0, max: 360 },
+      gravityY: 60,
+      scale: { start: 1.1, end: 0 },
+      tint: [0xffe070, 0xff8a30, 0xff5a20],
+      lifespan: 420,
+      quantity: 16,
+      emitting: false
+    });
+    emitter.setDepth(32);
+    emitter.explode(16);
+    this.time.delayedCall(480, () => emitter.destroy());
+  }
+
+  private applyStun(target: Unit, ms: number) {
+    if (!target.alive) return;
+    target.stunnedUntil = Math.max(target.stunnedUntil, this.time.now + ms);
+    this.spawnSpark(target.x, target.y - target.height * 0.3);
+  }
+
+  private spawnLevelUpText(x: number, y: number) {
+    const t = this.add.text(x, y, 'LV UP!', {
+      fontFamily: 'sans-serif',
+      fontSize: '15px',
+      fontStyle: 'bold',
+      color: '#ffe066',
+      stroke: '#000000',
+      strokeThickness: 4
+    });
+    t.setOrigin(0.5).setDepth(45);
+    this.tweens.add({
+      targets: t,
+      y: y - 30,
+      alpha: { from: 1, to: 0 },
+      scale: { from: 0.8, to: 1.2 },
+      duration: 900,
+      ease: 'Quad.Out',
+      onComplete: () => t.destroy()
     });
   }
 
@@ -618,11 +703,15 @@ export class BattleScene extends Phaser.Scene {
   }
 
   // ---------- 스킬 ----------
+  // 일섬: 영웅 빙의 중 + MP 충분 + 쿨다운 완료 시 발동. MP 소모.
   requestSkill() {
     if (this.gameState !== 'playing' || !this.hero.alive) return;
     if (this.controlled !== this.hero) return;
     const now = this.time.now;
+    if (!this.hero.skillReady(now)) return;
+    if (this.hero.mp < SKILL.ilseomMpCost) return;
     if (this.hero.tryUseSkill(this.ctx, now)) {
+      this.hero.mp -= SKILL.ilseomMpCost;
       const r2 = HERO.skillRadius * HERO.skillRadius;
       for (const e of this.enemies.slice()) {
         const dx = e.x - this.hero.x;
@@ -636,6 +725,11 @@ export class BattleScene extends Phaser.Scene {
     return this.hero ? this.hero.skillCooldownRatio(this.time.now) : 1;
   }
 
+  // UI: 스킬 버튼 활성 여부 (영웅 빙의 + MP 충분)
+  canUseSkill(): boolean {
+    return this.isControllingHero() && this.hero.alive && this.hero.mp >= SKILL.ilseomMpCost;
+  }
+
   restart() {
     this.scene.stop('UIScene');
     this.scene.restart();
@@ -644,7 +738,7 @@ export class BattleScene extends Phaser.Scene {
 
   // ---------- UI 게터 ----------
   getHeroHp() {
-    return { hp: Math.max(0, Math.ceil(this.hero?.hp ?? 0)), max: HERO.hp };
+    return { hp: Math.max(0, Math.ceil(this.hero?.hp ?? 0)), max: this.hero?.maxHp ?? 0 };
   }
   isControllingHero() {
     return this.controlled === this.hero;
@@ -663,15 +757,39 @@ export class BattleScene extends Phaser.Scene {
   getInfoUnit() {
     const u = this.selected && this.selected.alive ? this.selected : this.controlled;
     if (!u || !u.alive) return null;
+    const equip: InfoEquipSlot[] = EQUIP_SLOTS.map((slot) => {
+      const it = u.equipment[slot];
+      return {
+        slot,
+        slotName: SLOT_NAME[slot],
+        iconKey: SLOT_ICON[slot],
+        name: it ? it.name : '-',
+        filled: !!it,
+        highlight: !!(it && it.highlight)
+      };
+    });
+    // 장착 무기의 proc 스킬 설명 (예: "폭열검 — 타격 시 10% 폭발")
+    const w = u.equipment.weapon;
+    const proc = itemProc(w);
+    const procDesc = w && proc ? `${w.name} — ${proc.desc}` : null;
     return {
       label: u.label,
       typeName: TYPE_NAME[u.unitType],
+      level: u.level,
       hp: Math.max(0, Math.ceil(u.hp)),
       max: u.maxHp,
+      mp: Math.max(0, Math.ceil(u.mp)),
+      maxMp: u.maxMp,
       kills: u.kills,
+      exp: u.exp,
+      expNext: expForNext(u.level),
+      atk: u.getAtk(),
+      def: u.getDef(),
       faction: u.faction,
       textureKey: u.texture.key,
-      possessed: u === this.controlled
+      possessed: u === this.controlled,
+      equip,
+      procDesc
     };
   }
 
@@ -685,12 +803,14 @@ export class BattleScene extends Phaser.Scene {
     this.rebuildGrids();
     this.updateCentroids();
 
-    if (this.controlled && this.controlled.alive) this.controlled.playerUpdate(delta, this.ctx);
+    // 빙의 유닛: 기본은 AI(자동 이동+공격)가 돌고, 유저 입력 중에만 이동 수동 오버라이드
+    if (this.controlled && this.controlled.alive) this.controlled.updateAsControlled(delta, this.ctx);
+    // 영웅은 비조작 시 매 프레임 반응 (스태거 루프에서는 제외해 중복 틱 방지)
     if (this.hero.alive && this.controlled !== this.hero) this.hero.aiTick(delta, this.ctx);
 
     const group = this.frameCount % AI.tickGroups;
     for (const a of this.allies) {
-      if (a === this.controlled) continue;
+      if (a === this.controlled || a === this.hero) continue;
       if (a.uid % AI.tickGroups === group) a.aiTick(delta, this.ctx);
     }
     for (const e of this.enemies) {
@@ -794,7 +914,53 @@ export class BattleScene extends Phaser.Scene {
       controllingHero: () => this.controlled === this.hero,
       controlledPos: () =>
         this.controlled && this.controlled.alive ? { x: this.controlled.x, y: this.controlled.y } : null,
+      // 하이브리드 조작: 현재 수동 이동 오버라이드가 활성인지
+      controlledManual: () =>
+        this.controlled && this.controlled.alive ? this.controlled.isManualActive(this.ctx) : false,
       infoLabel: () => (this.getInfoUnit() ? this.getInfoUnit()!.label : null),
+      // ---- RPG 스탯/장비/스킬 검증 ----
+      unitStats: (u: Unit | null) =>
+        u && u.alive
+          ? {
+              label: u.label,
+              className: TYPE_NAME[u.unitType],
+              level: u.level,
+              exp: u.exp,
+              hp: Math.ceil(u.hp),
+              maxHp: u.maxHp,
+              mp: Math.ceil(u.mp),
+              maxMp: u.maxMp,
+              atk: u.getAtk(),
+              def: u.getDef(),
+              speed: u.speed,
+              equipment: EQUIP_SLOTS.map((s) => (u.equipment[s] ? u.equipment[s]!.name : '-'))
+            }
+          : null,
+      heroStats: () => (window as any).__debug.unitStats(this.hero),
+      allyStats: (i: number) => (window as any).__debug.unitStats(this.allies[i] ?? null),
+      enemyStats: (i: number) => (window as any).__debug.unitStats(this.enemies[i] ?? null),
+      maxAllyLevel: () => this.allies.reduce((m, a) => (a.alive ? Math.max(m, a.level) : m), 1),
+      // 강제 EXP 지급 (레벨업 검증)
+      grantExp: (i: number, amount: number) => {
+        const a = this.allies[i];
+        if (!a || !a.alive) return -1;
+        for (let k = 0; k < amount; k++) a.gainExpFromKill({ unitType: 'hero' } as any, this.ctx);
+        return a.level;
+      },
+      // 폭열검 강제 발동: 조작 유닛 위치에서 폭발 → 피해 준 적 수 반환
+      forceExplode: (radius = 90, dmg = 45) => {
+        const u = this.controlled && this.controlled.alive ? this.controlled : this.hero;
+        if (!u || !u.alive) return 0;
+        return this.explodeAt(u.x, u.y, radius, dmg, 'ally', u);
+      },
+      // 적 중심에서 폭발 강제 발동 (폭열검 AOE 검증 — 조작 유닛/영웅을 위험에 두지 않음)
+      forceExplodeAtEnemies: (radius = 120, dmg = 45) => {
+        if (!this.enemyCentroid) return 0;
+        return this.explodeAt(this.enemyCentroid.x, this.enemyCentroid.y, radius, dmg, 'ally', this.hero);
+      },
+      enemyCentroid: () => this.enemyCentroid,
+      canUseSkill: () => this.canUseSkill(),
+      heroMp: () => (this.hero && this.hero.alive ? { mp: Math.ceil(this.hero.mp), max: this.hero.maxMp } : null),
       selectAlly: (i: number) => {
         const u = this.allies[i];
         if (u && u.alive) {

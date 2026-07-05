@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { SQUADS } from '../config';
 import { Hero } from '../units/Hero';
 import { Projectile } from '../units/Projectile';
+import { EQUIP_SLOTS, SLOT_ICON } from '../rpg/items';
 import {
   genUnit,
   genBanner,
@@ -12,6 +13,9 @@ import {
   genTree,
   genRock,
   genBush,
+  genExplosionRing,
+  genFireShard,
+  genItemIcon,
   UnitKind
 } from '../gen/spriteGen';
 
@@ -36,9 +40,14 @@ export class BootScene extends Phaser.Scene {
     genSpark(this, 'spark');
     genSelectRing(this, 'selectRing');
     genTargetRing(this, 'targetRing');
+    genExplosionRing(this, 'explosionRing');
+    genFireShard(this, 'fireShard');
     genTree(this, 'tree');
     genRock(this, 'rock');
     genBush(this, 'bush');
+
+    // 장비 슬롯 아이콘 (하단 정보창)
+    for (const slot of EQUIP_SLOTS) genItemIcon(this, SLOT_ICON[slot], slot);
 
     // 핏빛 파편 + 진영 파편
     genParticle(this, 'blood_ally', 0xc0303a);

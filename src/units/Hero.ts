@@ -20,8 +20,6 @@ export class Hero extends Unit {
       faction: 'ally',
       unitType: 'hero',
       squadId,
-      hp: HERO.hp,
-      speed: HERO.speed,
       knockback: HERO.knockback,
       particleColor: 0xffd23b
     });
@@ -30,9 +28,9 @@ export class Hero extends Unit {
 
   private stats(): CombatStats {
     return {
-      detectRange: 320,
+      detectRange: 340,
       attackRange: HERO.attackRange,
-      attackDamage: HERO.attackDamage,
+      attackDamage: this.getAtk(),
       attackCooldown: HERO.attackCooldown
     };
   }
@@ -45,6 +43,7 @@ export class Hero extends Unit {
     return Phaser.Math.Clamp((now - this.lastSkill) / HERO.skillCooldown, 0, 1);
   }
 
+  // 쿨다운/연출만 담당. MP 소모 판정은 BattleScene.requestSkill에서.
   tryUseSkill(_ctx: BattleContext, now: number): boolean {
     if (!this.skillReady(now)) return false;
     this.lastSkill = now;
@@ -63,46 +62,11 @@ export class Hero extends Unit {
     return true;
   }
 
-  protected playerAttack(ctx: BattleContext) {
-    if (ctx.time - this.lastAttack >= HERO.attackCooldown) {
-      const target = ctx.findNearestEnemy('ally', this.x, this.y, HERO.attackRange);
-      if (target) {
-        this.lastAttack = ctx.time;
-        target.takeDamage(HERO.attackDamage, ctx, this);
-        this.attackVisual(ctx, target.x, target.y);
-      }
-    }
-  }
-
-  // 자율 영웅: 전장으로 돌진해 자멸하지 않도록 "제자리 사수" — 사거리 내 적만 처치
+  // 자율 영웅: 병사와 같은 교전 AI로 스스로 싸운다 (빙의 여부와 무관).
+  // 근접형이라 후퇴 개념이 없어 combatMelee로 최전선에서 교전.
   aiTick(dt: number, ctx: BattleContext): void {
     if (!this.alive) return;
     this.updateFlash(ctx);
-    if (!ctx.combatActive()) {
-      this.halt();
-      this.animateWalk(dt, false);
-      return;
-    }
-    const s = this.stats();
-    const e = this.seekTarget(ctx, s.detectRange);
-    if (!e) {
-      this.halt();
-      this.animateWalk(dt, false);
-      return;
-    }
-    const d = Math.hypot(e.x - this.x, e.y - this.y);
-    if (d <= s.attackRange) {
-      this.halt();
-      if (ctx.time - this.lastAttack >= s.attackCooldown) {
-        this.lastAttack = ctx.time;
-        e.takeDamage(s.attackDamage, ctx, this);
-        this.attackVisual(ctx, e.x, e.y);
-      } else {
-        this.animateWalk(dt, false);
-      }
-    } else {
-      this.moveToward(e.x, e.y, s.attackRange - 4);
-      this.animateWalk(dt, true);
-    }
+    this.combatMelee(dt, ctx, this.stats());
   }
 }

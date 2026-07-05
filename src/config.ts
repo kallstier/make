@@ -128,6 +128,89 @@ export const MONSTER = {
 // 유닛 병종 식별자
 export type UnitType = 'hero' | 'melee' | 'ranged' | 'spear' | 'goblin' | 'goblinArcher' | 'oni';
 
+// ============================================================
+// RPG 스탯 층 (직업/레벨/장비 → 최종 스탯)
+// 직업(class) = 병종(unitType) 기반 표시명. 전직은 이번 스코프 밖(구조만 마련).
+// ============================================================
+
+// 직업 표시명 (하단 정보창/이름표). BattleScene의 TYPE_NAME과 공유.
+export const CLASS_NAME: Record<UnitType, string> = {
+  hero: '영웅',
+  melee: '검병',
+  ranged: '궁병',
+  spear: '창병',
+  goblin: '고블린',
+  goblinArcher: '고블린 궁수',
+  oni: '오니'
+};
+
+// 스탯 성분: 공격력/방어력/최대HP/최대MP/이동속도
+export interface StatBase {
+  hp: number;
+  mp: number;
+  atk: number;
+  def: number;
+  speed: number;
+}
+
+// 직업별 기본 스탯 (레벨1, 장비 미착용). 최종 = base + 레벨성장 + 장비보정.
+export const CLASS_STATS: Record<UnitType, StatBase> = {
+  hero: { hp: 250, mp: 60, atk: 22, def: 3, speed: 190 },
+  melee: { hp: 52, mp: 10, atk: 10, def: 2, speed: 88 },
+  ranged: { hp: 36, mp: 20, atk: 9, def: 1, speed: 84 },
+  spear: { hp: 68, mp: 10, atk: 13, def: 2, speed: 82 },
+  goblin: { hp: 50, mp: 0, atk: 14, def: 1, speed: 90 },
+  goblinArcher: { hp: 36, mp: 0, atk: 12, def: 0, speed: 86 },
+  oni: { hp: 185, mp: 0, atk: 24, def: 3, speed: 66 }
+};
+
+// 레벨업 시 (레벨-1)배 적용되는 성장치. 적(고정 레벨)은 0.
+export const LEVEL_GROWTH: Record<UnitType, StatBase> = {
+  hero: { hp: 22, mp: 8, atk: 3, def: 1, speed: 0 },
+  melee: { hp: 8, mp: 2, atk: 2, def: 1, speed: 0 },
+  ranged: { hp: 6, mp: 3, atk: 2, def: 0, speed: 0 },
+  spear: { hp: 9, mp: 2, atk: 2, def: 1, speed: 0 },
+  goblin: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
+  goblinArcher: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 },
+  oni: { hp: 0, mp: 0, atk: 0, def: 0, speed: 0 }
+};
+
+// 레벨 L→L+1 에 필요한 누적 EXP (index 0 = 1→2). 마지막 값 이후로는 성장 정지.
+export const EXP_TABLE = [12, 28, 50, 80];
+export const MAX_LEVEL = EXP_TABLE.length + 1; // 5
+
+// 처치 대상 병종별 EXP 보상 (처치자에게 지급, 아군만 레벨업)
+export const EXP_REWARD: Record<UnitType, number> = {
+  hero: 5,
+  melee: 5,
+  ranged: 5,
+  spear: 5,
+  goblin: 8,
+  goblinArcher: 8,
+  oni: 20
+};
+
+// 피해 계산: dmg = max(1, atk - def * DAMAGE.defFactor)
+export const DAMAGE = {
+  defFactor: 0.5
+};
+
+// 레벨업 회복 비율 (최대치 대비)
+export const LEVELUP = {
+  hpHealRatio: 0.4,
+  mpHealRatio: 0.5
+};
+
+// 하이브리드 조작: 입력이 끝난 뒤 이 시간(ms)만큼 수동 유지 후 AI 이동 재개
+export const CONTROL = {
+  manualGraceMs: 500
+};
+
+// 영웅 액티브 스킬(일섬) MP 소모
+export const SKILL = {
+  ilseomMpCost: 30
+};
+
 // 부대(squad): 원작의 병력 단위. 1부대 ≈ 20명.
 // 전략층(예정)에서 거점 이동의 "이동 단위"가 되므로 배열로 명확히 모델링.
 export interface SquadDef {

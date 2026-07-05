@@ -1,7 +1,10 @@
 import Phaser from 'phaser';
 import type { UnitType } from '../config';
-import { CROWD } from '../config';
+import { CROWD, CONTROL, LEVELUP, DAMAGE, EXP_REWARD, MAX_LEVEL } from '../config';
 import { FRAME } from '../gen/spriteGen';
+import type { Equipment } from '../rpg/items';
+import { makeEquipment, itemProc } from '../rpg/items';
+import { computeStats, expForNext, StatBlock } from '../rpg/stats';
 
 export type Faction = 'ally' | 'enemy';
 
@@ -12,7 +15,7 @@ export interface BattleContext {
   spawnProjectile(x: number, y: number, target: Unit, damage: number, faction: Faction, speed: number): void;
   onUnitDied(unit: Unit, killer: Unit | null): void;
   spawnCorpse(unit: Unit): void;
-  spawnDamageNumber(x: number, y: number, amount: number, faction: Faction): void;
+  spawnDamageNumber(x: number, y: number, amount: number, faction: Faction, color?: string): void;
   spawnSpark(x: number, y: number): void;
   emitBlood(x: number, y: number, color: number): void;
   heroRef(): Unit | null;
@@ -20,13 +23,17 @@ export interface BattleContext {
   controlledRef(): Unit | null;
   combatActive(): boolean; // 개전 대기(정렬) 종료 후 true → 전진/교전 개시
   rallyPoint(faction: Faction): { x: number; y: number } | null; // 상대 진영 중심(집결점)
+  // 스킬 장비(proc) 연출/판정 위임
+  explodeAt(x: number, y: number, radius: number, damage: number, faction: Faction, attacker: Unit | null): void;
+  applyStun(target: Unit, ms: number): void;
+  spawnLevelUpText(x: number, y: number): void;
 }
 
 // 병종별 전투 수치 (combatMelee/combatRanged 공용)
 export interface CombatStats {
   detectRange: number;
   attackRange: number;
-  attackDamage: number;
+  attackDamage: number; // = 유닛 최종 공격력 (getAtk). 투사체가 실어 나른다.
   attackCooldown: number;
   keepDist?: number;
   projectileSpeed?: number;
@@ -37,10 +44,9 @@ export interface UnitConfig {
   faction: Faction;
   unitType: UnitType;
   squadId: number;
-  hp: number;
-  speed: number;
   knockback: number;
   particleColor: number;
+  level?: number;
 }
 
 let _uid = 0;
@@ -49,10 +55,21 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
   readonly uid: number;
   faction: Faction;
   unitType: UnitType;
+  // 직업(class): 현재는 병종과 1:1. 전직(예정) 시 unitType과 분리될 자리.
+  classId: UnitType;
   squadId: number;
-  hp: number;
-  maxHp: number;
-  speed: number;
+
+  // ---- RPG 스탯 ----
+  level: number;
+  exp = 0;
+  equipment: Equipment;
+  stat!: StatBlock;
+  hp: number = 0;
+  maxHp = 0;
+  mp = 0;
+  maxMp = 0;
+  speed = 0;
+
   knockback: number;
   particleColor: number;
   kills = 0;
@@ -63,6 +80,11 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
   // 플레이어 조작(빙의) 상태 및 이동 입력 벡터
   playerControlled = false;
   protected moveVec = new Phaser.Math.Vector2(0, 0);
+  // 하이브리드 조작: 이 시각 전까지는 수동 이동이 AI 이동을 오버라이드
+  manualUntil = 0;
+
+  // 스턴: 이 시각 전까지 이동/공격 정지
+  stunnedUntil = 0;
 
   // 중앙 집중식 속도 모델: AI/입력은 "희망 속도"만 세팅,
   // 최종 속도 = 희망 + 분리(separation) + 넉백 → 씬이 매 프레임 적용
@@ -80,12 +102,16 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
     this.uid = _uid++;
     this.faction = cfg.faction;
     this.unitType = cfg.unitType;
+    this.classId = cfg.unitType;
     this.squadId = cfg.squadId;
-    this.hp = cfg.hp;
-    this.maxHp = cfg.hp;
-    this.speed = cfg.speed;
     this.knockback = cfg.knockback;
     this.particleColor = cfg.particleColor;
+    this.level = cfg.level ?? 1;
+    this.equipment = makeEquipment(cfg.unitType);
+
+    this.recomputeStats();
+    this.hp = this.maxHp;
+    this.mp = this.maxMp;
 
     scene.add.existing(this);
     scene.physics.add.existing(this);
@@ -96,9 +122,50 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
     body.setCollideWorldBounds(true);
   }
 
+  // 최종 스탯 재계산 (레벨업/장비 변경 시). 현재 hp/mp는 보존.
+  recomputeStats() {
+    this.stat = computeStats(this.unitType, this.level, this.equipment);
+    this.maxHp = this.stat.maxHp;
+    this.maxMp = this.stat.maxMp;
+    this.speed = this.stat.speed;
+    if (this.hp > this.maxHp) this.hp = this.maxHp;
+    if (this.mp > this.maxMp) this.mp = this.maxMp;
+  }
+
+  getAtk(): number {
+    return this.stat.atk;
+  }
+  getDef(): number {
+    return this.stat.def;
+  }
+
+  // ---- 경험치 / 레벨업 (아군만) ----
+  gainExpFromKill(victim: Unit, ctx: BattleContext) {
+    if (this.faction !== 'ally' || !this.alive) return;
+    if (this.level >= MAX_LEVEL) return;
+    this.exp += EXP_REWARD[victim.unitType] ?? 5;
+    while (this.level < MAX_LEVEL && this.exp >= expForNext(this.level)) {
+      this.exp -= expForNext(this.level);
+      this.level++;
+      this.onLevelUp(ctx);
+    }
+  }
+
+  protected onLevelUp(ctx: BattleContext) {
+    this.recomputeStats();
+    // 레벨업 시 HP/MP 일부 회복
+    this.hp = Math.min(this.maxHp, this.hp + this.maxHp * LEVELUP.hpHealRatio);
+    this.mp = Math.min(this.maxMp, this.mp + this.maxMp * LEVELUP.mpHealRatio);
+    ctx.spawnLevelUpText(this.x, this.y - this.height * 0.5);
+  }
+
   // 크라우드 분리 반경 (오니는 더 크게). 두 유닛 임계거리 = 양쪽 합.
   get sepRadius(): number {
     return CROWD.separationRadius * 0.5 * (this.unitType === 'oni' ? 1.6 : 1);
+  }
+
+  isStunned(ctx: BattleContext): boolean {
+    return this.stunnedUntil > ctx.time;
   }
 
   // 외부(씬)에서 조작 전환 시 정지
@@ -138,12 +205,14 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
     return (this.scene as Phaser.Scene).time.now;
   }
 
-  takeDamage(amount: number, ctx: BattleContext, attacker: Unit | null = null) {
+  takeDamage(amount: number, ctx: BattleContext, attacker: Unit | null = null, color?: string) {
     if (!this.alive) return;
-    this.hp -= amount;
+    // 방어력 반영
+    const dmg = Math.max(1, amount - this.getDef() * DAMAGE.defFactor);
+    this.hp -= dmg;
     this.flashUntil = ctx.time + 90;
     this.setTintFill(0xffffff);
-    ctx.spawnDamageNumber(this.x, this.y - this.height * 0.42, Math.round(amount), this.faction);
+    ctx.spawnDamageNumber(this.x, this.y - this.height * 0.42, Math.round(dmg), this.faction, color);
     ctx.spawnSpark(this.x, this.y - this.height * 0.2);
     // 넉백 (공격자 반대 방향)
     if (attacker && this.knockback > 0) {
@@ -155,8 +224,23 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
       this.kby += (dy / d) * imp;
     }
     if (this.hp <= 0) {
-      if (attacker && attacker.alive) attacker.kills++;
+      if (attacker && attacker.alive) {
+        attacker.kills++;
+        attacker.gainExpFromKill(this, ctx);
+      }
       this.die(ctx, attacker);
+    }
+  }
+
+  // 근접 타격 통합 처리: 피해 + 무기 proc 스킬 발동
+  protected dealMelee(ctx: BattleContext, target: Unit) {
+    const hitX = target.x;
+    const hitY = target.y - target.height * 0.2;
+    target.takeDamage(this.getAtk(), ctx, this);
+    const w = this.equipment.weapon;
+    const proc = itemProc(w);
+    if (proc && Math.random() < proc.chance) {
+      proc.effect(ctx, this, target, hitX, hitY);
     }
   }
 
@@ -238,11 +322,28 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
     this.moveVec.set(x, y);
   }
 
-  playerUpdate(dt: number, ctx: BattleContext) {
+  // 하이브리드 조작: 기본은 AI가 이동+공격을 수행하고, 유저 입력이 활성인 동안만
+  // (그리고 입력 종료 후 manualGraceMs 동안) 이동을 수동으로 오버라이드한다.
+  // 자동 공격은 항상 유지된다(AI가 매 프레임 처리).
+  updateAsControlled(dt: number, ctx: BattleContext) {
     if (!this.alive) return;
-    this.playerMove(dt);
-    this.playerAttack(ctx);
-    this.updateFlash(ctx);
+    // 자율 AI (자동 이동 + 자동 공격)
+    this.aiTick(dt, ctx);
+
+    if (this.isStunned(ctx)) return; // 스턴 중엔 수동 이동도 불가
+
+    const inLen = this.moveVec.length();
+    if (inLen > 0.01) this.manualUntil = ctx.time + CONTROL.manualGraceMs;
+
+    if (ctx.time < this.manualUntil) {
+      // 수동 이동 오버라이드 (AI가 세팅한 dvx/dvy를 덮어씀). 자동 공격은 유지.
+      this.playerMove(dt);
+    }
+  }
+
+  // 조작 중 수동 이동이 활성인지 (디버그/판정용)
+  isManualActive(ctx: BattleContext): boolean {
+    return ctx.time < this.manualUntil;
   }
 
   protected playerMove(dt: number) {
@@ -261,10 +362,6 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
       this.dvy = 0;
       this.animateWalk(dt, false);
     }
-  }
-
-  protected playerAttack(_ctx: BattleContext): void {
-    /* 서브클래스에서 구현 */
   }
 
   // ---------- 자율 AI 공용 전투 루틴 ----------
@@ -288,6 +385,11 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
   }
 
   protected combatMelee(dt: number, ctx: BattleContext, s: CombatStats) {
+    if (this.isStunned(ctx)) {
+      this.halt();
+      this.animateWalk(dt, false);
+      return;
+    }
     if (!ctx.combatActive()) {
       this.halt();
       this.animateWalk(dt, false);
@@ -303,7 +405,7 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
       this.halt();
       if (ctx.time - this.lastAttack >= s.attackCooldown) {
         this.lastAttack = ctx.time;
-        e.takeDamage(s.attackDamage, ctx, this);
+        this.dealMelee(ctx, e);
         this.attackVisual(ctx, e.x, e.y);
       } else {
         this.animateWalk(dt, false);
@@ -315,6 +417,11 @@ export abstract class Unit extends Phaser.Physics.Arcade.Sprite {
   }
 
   protected combatRanged(dt: number, ctx: BattleContext, s: CombatStats) {
+    if (this.isStunned(ctx)) {
+      this.halt();
+      this.animateWalk(dt, false);
+      return;
+    }
     if (!ctx.combatActive()) {
       this.halt();
       this.animateWalk(dt, false);
