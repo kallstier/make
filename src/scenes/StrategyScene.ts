@@ -43,6 +43,10 @@ export class StrategyScene extends Phaser.Scene {
   private lastPinch = 0;
   private uiConsumed = false;
   private popupOpen = false;
+  // 팝업/결과창 버튼의 화면좌표 히트 영역.
+  // 컨테이너(scrollFactor 0) 내부 zone은 카메라 줌/스크롤 시 입력 판정이 어긋나는
+  // Phaser 제약이 있어, 화면 좌표로 직접 히트 테스트한다.
+  private popupHits: { x: number; y: number; w: number; h: number; cb: () => void }[] = [];
 
   // UI (scrollFactor 0)
   private turnBar!: Phaser.GameObjects.Graphics;
@@ -477,21 +481,36 @@ export class StrategyScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(101);
-    this.endZone = this.add
-      .zone(0, 0, this.END_W, this.END_H)
-      .setScrollFactor(0)
-      .setDepth(102)
-      .setInteractive({ useHandCursor: true });
-    this.endZone.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
-      e.stopPropagation();
-      this.uiConsumed = true;
-      this.endTurnHuman();
-    });
+    // 위치 기준점으로만 사용 — 입력은 아래 화면좌표 직접 판정 리스너가 처리
+    // (카메라 줌이 1이 아니면 zone 히트 영역이 어긋나는 Phaser 제약)
+    this.endZone = this.add.zone(0, 0, this.END_W, this.END_H).setScrollFactor(0).setDepth(102);
 
     // 카드 컨테이너 (좌하단)
     this.squadCard = this.add.container(0, 0).setScrollFactor(0).setDepth(103).setVisible(false);
     this.nodeCard = this.add.container(0, 0).setScrollFactor(0).setDepth(103).setVisible(false);
     this.popup = this.add.container(0, 0).setScrollFactor(0).setDepth(150).setVisible(false);
+
+    // 고정 UI 버튼 입력: 화면 좌표 직접 판정 (카메라 줌 시 zone 히트 어긋남 회피)
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.popupOpen) {
+        for (const b of this.popupHits) {
+          if (Math.abs(p.x - b.x) <= b.w / 2 && Math.abs(p.y - b.y) <= b.h / 2) {
+            this.uiConsumed = true;
+            b.cb();
+            return;
+          }
+        }
+        return;
+      }
+      // 턴 종료 버튼
+      if (
+        Math.abs(p.x - this.endZone.x) <= this.END_W / 2 &&
+        Math.abs(p.y - this.endZone.y) <= this.END_H / 2
+      ) {
+        this.uiConsumed = true;
+        this.endTurnHuman();
+      }
+    });
     this.endScreen = this.add.container(0, 0).setScrollFactor(0).setDepth(160).setVisible(false);
 
     this.updateTurnText();
@@ -680,6 +699,7 @@ export class StrategyScene extends Phaser.Scene {
     const node = getNode(atk.targetNodeId);
     if (!node) return;
     this.popupOpen = true;
+    this.popupHits = [];
     this.popup.removeAll(true);
     const w = this.scale.width;
     const h = this.scale.height;
@@ -738,13 +758,7 @@ export class StrategyScene extends Phaser.Scene {
       .text(cx, cy, label, { fontFamily: 'sans-serif', fontSize: '24px', fontStyle: 'bold', color: '#ffffff' })
       .setOrigin(0.5);
     this.popup.add(t);
-    const zone = this.add.zone(cx, cy, bw, bh).setInteractive({ useHandCursor: true });
-    zone.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
-      e.stopPropagation();
-      this.uiConsumed = true;
-      onClick();
-    });
-    this.popup.add(zone);
+    this.popupHits.push({ x: cx, y: cy, w: bw, h: bh, cb: onClick });
   }
 
   private checkEndState() {
@@ -755,6 +769,7 @@ export class StrategyScene extends Phaser.Scene {
   private showEndScreen(victory: boolean) {
     const st = getState();
     this.popupOpen = true;
+    this.popupHits = [];
     this.endScreen.removeAll(true);
     const w = this.scale.width;
     const h = this.scale.height;
@@ -799,14 +814,16 @@ export class StrategyScene extends Phaser.Scene {
         .text(bx, by, '다시 시작', { fontFamily: 'sans-serif', fontSize: '24px', fontStyle: 'bold', color: '#ffffff' })
         .setOrigin(0.5)
     );
-    const zone = this.add.zone(bx, by, bw, bh).setInteractive({ useHandCursor: true });
-    zone.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, e: Phaser.Types.Input.EventData) => {
-      e.stopPropagation();
-      this.uiConsumed = true;
-      initGameState();
-      this.scene.restart();
+    this.popupHits.push({
+      x: bx,
+      y: by,
+      w: bw,
+      h: bh,
+      cb: () => {
+        initGameState();
+        this.scene.restart();
+      }
     });
-    this.endScreen.add(zone);
     this.endScreen.setVisible(true);
   }
 
