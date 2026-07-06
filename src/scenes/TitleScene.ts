@@ -10,6 +10,7 @@ export class TitleScene extends Phaser.Scene {
   private btnText!: Phaser.GameObjects.Text;
   private btnZone!: Phaser.GameObjects.Zone;
   private hintText!: Phaser.GameObjects.Text;
+  private buildText!: Phaser.GameObjects.Text;
   private readonly btnW = 240;
   private readonly btnH = 66;
 
@@ -85,6 +86,11 @@ export class TitleScene extends Phaser.Scene {
       )
       .setOrigin(0.5);
 
+    // 빌드 식별자 (배포 확인용) — 우하단 구석
+    this.buildText = this.add
+      .text(0, 0, `빌드 ${__BUILD_ID__}`, { fontFamily: 'monospace', fontSize: '12px', color: '#5a6b85' })
+      .setOrigin(1, 1);
+
     this.layout();
     drawBtn(false);
 
@@ -121,5 +127,6 @@ export class TitleScene extends Phaser.Scene {
     this.btn.lineStyle(3, 0xffffff, 0.8);
     this.btn.strokeRoundedRect(bx - this.btnW / 2, by - this.btnH / 2, this.btnW, this.btnH, 14);
     this.hintText.setPosition(w / 2, h * 0.82);
+    this.buildText.setPosition(w - 8, h - 6);
   }
 }
